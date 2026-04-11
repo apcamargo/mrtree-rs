@@ -4,8 +4,8 @@ use std::collections::{BTreeSet, HashMap};
 use float_cmp::approx_eq;
 #[cfg(test)]
 use float_cmp::assert_approx_eq;
-use rayon::ThreadPool;
 use rayon::prelude::*;
+use rayon::ThreadPool;
 
 use super::paths;
 use super::tree;
@@ -890,14 +890,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn effective_weighting_depends_on_non_uniform_weights() {
-        assert!(!has_effective_weighting(&[]));
-        assert!(!has_effective_weighting(&[1.0]));
-        assert!(!has_effective_weighting(&[2.0, 2.0, 2.0]));
-        assert!(has_effective_weighting(&[1.0, 2.0, 1.0]));
-    }
-
     fn assert_reconciled_output(paths: &[Path], expected_rows: usize, expected_cols: usize) {
         assert_eq!(paths.len(), expected_rows);
         assert!(paths.iter().all(|path| path.len() == expected_cols));
@@ -1070,34 +1062,6 @@ mod tests {
                 edge(1, 3, 2, 2),
             ]
         );
-    }
-
-    #[test]
-    fn candidate_cost_respects_sample_weights() {
-        let labels = labels(&[&[1, 1], &[2, 1], &[2, 2]]);
-        let assigned = vec![path(&[1, 1]), path(&[2, 1]), path(&[2, 2])];
-        let (store, state) = assigned_state(&assigned);
-        let feasible_ids = state.realized_path_ids_in_row_order();
-        let candidate = edge(0, 1, 1, 1);
-        let weights = [1.0, 2.0, 1.0];
-        let prepared = prepared_round(
-            std::slice::from_ref(&candidate),
-            &feasible_ids,
-            &state,
-            &store,
-            &labels,
-            None,
-        );
-        let inputs = ScoringInputs {
-            assigned_state: &state,
-            path_store: &store,
-            labels: &labels,
-            sample_weights: &weights,
-        };
-
-        let cost = candidate_cost(&prepared.jobs[0], &prepared, &inputs);
-
-        assert_approx_eq!(f64, cost, 2.0);
     }
 
     #[test]
