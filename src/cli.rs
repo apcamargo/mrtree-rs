@@ -18,8 +18,17 @@ const STYLES: Styles = Styles::styled()
     styles = STYLES
 )]
 pub(crate) struct Cli {
-    #[command(flatten)]
-    pub(crate) io: IoArgs,
+    /// Input TSV path. Use '-' for stdin
+    #[arg(default_value = "-")]
+    pub(crate) input: String,
+
+    /// Output TSV path. Use '-' for stdout
+    #[arg(default_value = "-")]
+    pub(crate) output: String,
+
+    /// Treat the first row as a header and emit a header row on output
+    #[arg(long, help_heading = "Input and output")]
+    pub(crate) header: bool,
 
     #[command(flatten)]
     pub(crate) preprocess: PreprocessArgs,
@@ -32,39 +41,12 @@ pub(crate) struct Cli {
 }
 
 #[derive(Debug, Clone, Args)]
-pub(crate) struct IoArgs {
-    /// Input TSV path. Use '-' for stdin
-    #[arg(
-        short,
-        long,
-        value_name = "PATH",
-        default_value = "-",
-        help_heading = "Input and output"
-    )]
-    pub(crate) input: String,
-
-    /// Output TSV path. Use '-' for stdout
-    #[arg(
-        short,
-        long,
-        value_name = "PATH",
-        default_value = "-",
-        help_heading = "Input and output"
-    )]
-    pub(crate) output: String,
-
-    /// Treat the first row as a header and emit a header row on output
-    #[arg(long, help_heading = "Input and output")]
-    pub(crate) header: bool,
-}
-
-#[derive(Debug, Clone, Args)]
 pub(crate) struct PreprocessArgs {
     /// Keep only clustering columns where the number of clusters (K) is < N
     #[arg(long = "max-k", value_name = "N", help_heading = "Preprocessing")]
     pub(crate) max_k: Option<usize>,
 
-    /// Merge same-K groups (same number of clusters) by consensus
+    /// Merge levels with the same number of clusters by taking their consensus
     #[arg(long, help_heading = "Preprocessing")]
     pub(crate) consensus: bool,
 }
@@ -72,11 +54,10 @@ pub(crate) struct PreprocessArgs {
 #[derive(Debug, Clone, Args)]
 pub(crate) struct ScoringArgs {
     /// Use inverse-cluster-size sample weights during scoring and consensus
-    #[arg(long = "sample-weighted", help_heading = "Reconciliation")]
-    pub(crate) sample_weighted: bool,
+    #[arg(long = "sample-weighting", help_heading = "Reconciliation")]
+    pub(crate) sample_weighting: bool,
 
-    /// Enable synthetic path augmentation; input labels must be non-negative
-    /// integers and surviving synthetic labels are emitted as -1
+    /// Enable synthetic path augmentation
     #[arg(long = "augment-path", help_heading = "Reconciliation")]
     pub(crate) augment_path: bool,
 }

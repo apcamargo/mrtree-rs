@@ -60,6 +60,11 @@ pub(crate) fn log_info(verbose: bool, args: fmt::Arguments<'_>) {
     }
 }
 
+#[doc(hidden)]
+pub fn log_info_message(verbose: bool, args: fmt::Arguments<'_>) {
+    log_info(verbose, args);
+}
+
 pub(crate) fn log_warn(args: fmt::Arguments<'_>) {
     log_message(LogLevel::Warn, args);
 }
@@ -72,7 +77,7 @@ pub struct RunPreprocessOptions {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunScoringOptions {
-    pub sample_weighted: bool,
+    pub sample_weighting: bool,
     pub augment_path: bool,
 }
 
@@ -120,10 +125,10 @@ pub fn reconcile_input(input: InputTable, options: &RunOptions) -> Result<RunRes
         log_warn(format_args!("{reorder_warning}"));
     }
 
-    if options.scoring.sample_weighted {
+    if options.scoring.sample_weighting {
         log_info(
             options.runtime.verbose,
-            format_args!("Enabled sample weighting"),
+            format_args!("Using inverse-cluster-size sample weighting"),
         );
     }
 
@@ -131,7 +136,7 @@ pub fn reconcile_input(input: InputTable, options: &RunOptions) -> Result<RunRes
         let state = consensus::reduce_same_k_groups(
             prepared.effective(),
             &consensus::ConsensusOptions {
-                sample_weighted: options.scoring.sample_weighted,
+                sample_weighting: options.scoring.sample_weighting,
                 seed: options.runtime.seed,
             },
         )?;
@@ -157,7 +162,7 @@ pub fn reconcile_input(input: InputTable, options: &RunOptions) -> Result<RunRes
     );
     let sample_weights = options
         .scoring
-        .sample_weighted
+        .sample_weighting
         .then(|| weights::compute_sample_weights(reconcile_input));
 
     let reconciled = reconcile::reconcile_labels(

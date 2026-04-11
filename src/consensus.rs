@@ -2,7 +2,7 @@ use crate::model::{EffectiveTable, LabelMatrix, Path};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConsensusOptions {
-    pub sample_weighted: bool,
+    pub sample_weighting: bool,
     pub seed: u64,
 }
 
@@ -34,7 +34,7 @@ pub fn reduce_same_k_groups(
     Ok(ConsensusReduction {
         inner: crate::algorithm::consensus::reduce_same_k_groups(
             effective,
-            options.sample_weighted,
+            options.sample_weighting,
             options.seed,
         )?,
     })

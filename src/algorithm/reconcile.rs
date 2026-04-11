@@ -449,9 +449,10 @@ pub(crate) fn run(
     crate::log_info(
         options.verbose,
         format_args!(
-            "Running reconciliation: Rows={}, Levels={}, Augment_path={}",
+            "Running reconciliation: Rows={}, Levels={}, Weighted={}, Augment path={}",
             labels.n_rows(),
             labels.n_cols(),
+            has_effective_weighting(sample_weights),
             options.augment_path
         ),
     );
@@ -826,6 +827,14 @@ fn reassign_affected_samples(
     );
 }
 
+fn has_effective_weighting(sample_weights: &[f64]) -> bool {
+    let Some((&first, rest)) = sample_weights.split_first() else {
+        return false;
+    };
+
+    rest.iter().any(|&weight| weight != first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -876,6 +885,14 @@ mod tests {
             threads,
             verbose: false,
         }
+    }
+
+    #[test]
+    fn effective_weighting_depends_on_non_uniform_weights() {
+        assert!(!has_effective_weighting(&[]));
+        assert!(!has_effective_weighting(&[1.0]));
+        assert!(!has_effective_weighting(&[2.0, 2.0, 2.0]));
+        assert!(has_effective_weighting(&[1.0, 2.0, 1.0]));
     }
 
     fn assert_reconciled_output(paths: &[Path], expected_rows: usize, expected_cols: usize) {

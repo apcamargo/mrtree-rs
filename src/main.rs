@@ -11,7 +11,7 @@ use cli::Cli;
 fn main() {
     let cli = Cli::parse();
 
-    if cli.io.input == "-" && io::stdin().is_terminal() {
+    if cli.input == "-" && io::stdin().is_terminal() {
         Cli::command().print_help().expect("help text should print");
         std::process::exit(0);
     }
@@ -26,16 +26,18 @@ fn main() {
 }
 
 fn run_cli(cli: &Cli) -> anyhow::Result<()> {
-    let input_reader: Box<dyn Read> = if cli.io.input == "-" {
+    let output_target = if cli.output == "-" {
+        "stdout"
+    } else {
+        cli.output.as_str()
+    };
+    let input_reader: Box<dyn Read> = if cli.input == "-" {
         Box::new(io::stdin())
     } else {
-        Box::new(
-            File::open(&cli.io.input)
-                .with_context(|| format!("unable to open {}", cli.io.input))?,
-        )
+        Box::new(File::open(&cli.input).with_context(|| format!("unable to open {}", cli.input))?)
     };
     let input =
-        mrtree::io::read_tsv(input_reader, cli.io.header).context("failed to read input table")?;
+        mrtree::io::read_tsv(input_reader, cli.header).context("failed to read input table")?;
     let result = mrtree::reconcile_input(
         input,
         &mrtree::RunOptions {
@@ -44,7 +46,7 @@ fn run_cli(cli: &Cli) -> anyhow::Result<()> {
                 consensus: cli.preprocess.consensus,
             },
             scoring: mrtree::RunScoringOptions {
-                sample_weighted: cli.scoring.sample_weighted,
+                sample_weighting: cli.scoring.sample_weighting,
                 augment_path: cli.scoring.augment_path,
             },
             runtime: mrtree::RunRuntimeOptions {
@@ -55,20 +57,19 @@ fn run_cli(cli: &Cli) -> anyhow::Result<()> {
         },
     )?;
 
-    let output_writer: Box<dyn Write> = if cli.io.output == "-" {
+    let output_writer: Box<dyn Write> = if cli.output == "-" {
         Box::new(io::stdout())
     } else {
         Box::new(
-            File::create(&cli.io.output)
-                .with_context(|| format!("unable to create {}", cli.io.output))?,
+            File::create(&cli.output)
+                .with_context(|| format!("unable to create {}", cli.output))?,
         )
     };
-    mrtree::io::write_tsv(
-        output_writer,
-        cli.io.header,
-        &result.effective,
-        &result.paths,
-    )
-    .context("failed to write output")?;
+    mrtree::io::write_tsv(output_writer, cli.header, &result.effective, &result.paths)
+        .context("failed to write output")?;
+    mrtree::log_info_message(
+        cli.runtime.verbose,
+        format_args!("Finished writing output to {output_target}"),
+    );
     Ok(())
 }

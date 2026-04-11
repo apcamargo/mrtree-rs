@@ -48,7 +48,7 @@ impl ConsensusState {
 
 pub(crate) fn reduce_same_k_groups(
     effective: &EffectiveTable,
-    sample_weighted: bool,
+    sample_weighting: bool,
     seed: u64,
 ) -> crate::Result<ConsensusState> {
     let mut reduced_columns = Vec::new();
@@ -83,7 +83,7 @@ pub(crate) fn reduce_same_k_groups(
         reduced_columns.push(consensus_column(
             &group_labels,
             k,
-            sample_weighted,
+            sample_weighting,
             seed.wrapping_add(reduced_index as u64),
         )?);
         group_start = group_end;
@@ -102,7 +102,7 @@ pub(crate) fn reduce_same_k_groups(
 fn consensus_column(
     labels: &LabelMatrix,
     k: usize,
-    sample_weighted: bool,
+    sample_weighting: bool,
     seed: u64,
 ) -> crate::Result<Vec<RealLabel>> {
     if k == 1 {
@@ -110,7 +110,7 @@ fn consensus_column(
     }
 
     let mut encoded = build_membership_matrix(labels, k);
-    if sample_weighted {
+    if sample_weighting {
         let sample_weights = weights::compute_sample_weights(labels);
         for (row_idx, weight) in sample_weights.into_iter().enumerate() {
             encoded

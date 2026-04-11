@@ -8,7 +8,7 @@ Multiresolution clustering results often do not form a clean hierarchy. In a hie
 
 Consider this input label matrix:
 
-```text
+```
 sample1	1	1	1
 sample2	1	1	1
 sample3	1	2	1
@@ -33,7 +33,7 @@ graph TD
 
 In this example, the last column does not align cleanly with the middle column. After reconciliation, the matrix becomes:
 
-```text
+```
 sample1	1	1	1
 sample2	1	1	1
 sample3	1	1	1
@@ -66,8 +66,8 @@ pixi global install mrtree-rs
 
 ## Usage
 
-```text
-mrtree-rs [OPTIONS]
+```
+mrtree-rs [OPTIONS] [INPUT] [OUTPUT]
 ```
 
 ### Input format
@@ -85,15 +85,15 @@ mrtree-rs [OPTIONS]
 
 ### Options
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `-i`, `--input <PATH>` | Input TSV file | `-` (stdin) |
-| `-o`, `--output <PATH>` | Output TSV file | `-` (stdout) |
+| Argument/Option | Description | Default |
+|-----------------|-------------|---------|
+| `INPUT` | Input TSV file | `-` (stdin) |
+| `OUTPUT` | Output TSV file | `-` (stdout) |
 | `--header` | Treat the first row as a header and emit a header row on output | off |
 | `--max-k <N>` | Keep only clustering columns where the number of clusters (`K`) is less than `N` | no limit |
 | `--consensus` | Combine repeated clustering levels with the same `K` (same number of clusters) | off |
-| `--sample-weighted` | Give more weight to samples from smaller clusters | off |
-| `--augment-path` | Allow placeholder labels when needed; surviving placeholders are written as `-1` | off |
+| `--sample-weighting` | Give more weight to samples from smaller clusters | off |
+| `--augment-path` | Enable synthetic path augmentation | off |
 | `--seed <N>` | Seed for deterministic consensus clustering | `0` |
 | `--threads <N>` | Number of worker threads; `0` uses all available threads | `1` |
 | `-v`, `--verbose` | Emit preprocessing and progress details to stderr | off |
@@ -108,50 +108,61 @@ Process a TSV label matrix from a file and write the reconciled result:
 
 ```sh
 # Read from a file and write to a file
-mrtree-rs --input clusters.tsv --output reconciled.tsv
+mrtree-rs clusters.tsv reconciled.tsv
 # Read from stdin and write to stdout
 cat clusters.tsv | mrtree-rs > reconciled.tsv
 ```
 
 ### Use headered input
 
-If your table has column names, pass `--header`. The sample header is preserved, and the retained clustering headers are emitted in coarse-to-fine order.
+Use `--header` when the first row contains column names. For example, if `clusters.tsv` looks like this:
+
+```
+sample_id	k1	k2	k3
+sample1	1	1	1
+sample2	1	2	1
+sample3	2	3	2
+```
+
+Run the following command:
 
 ```sh
-mrtree-rs --input clusters.tsv --output reconciled.tsv --header
+mrtree-rs clusters.tsv reconciled.tsv --header
 ```
+
+`mrtree-rs` will treat `sample_id`, `k1`, `k2`, and `k3` as headers rather than data and include a header row in the output:
 
 ### Filter high-resolution levels
 
 Use `--max-k` to ignore very fine clustering levels before reconciliation. For example, `--max-k 20` keeps only columns with fewer than `20` clusters.
 
 ```sh
-mrtree-rs --input clusters.tsv --output reconciled.tsv --max-k 20
+mrtree-rs clusters.tsv reconciled.tsv --max-k 20
 ```
 
-### Merge repeated K levels before reconciliation
+### Merge levels before reconciliation
 
-If your input contains repeated clustering levels with the same number of clusters, use `--consensus` to combine them first. Use `--seed` for deterministic results. Add `--sample-weighted` when smaller clusters should carry more influence.
+If your input contains repeated clustering levels with the same number of clusters, use `--consensus` to combine them first. Use `--seed` for deterministic results. Add `--sample-weighting` when smaller clusters should carry more influence.
 
 ```sh
-mrtree-rs --input clusters.tsv --output reconciled.tsv --header --consensus --seed 17
+mrtree-rs clusters.tsv reconciled.tsv --header --consensus --seed 17
 ```
 
 ### Use synthetic path augmentation
 
 `--augment-path` can preserve structure that would otherwise be forced into a less informative hierarchy. In that mode, placeholder labels are written as `-1` in the output:
 
-```text
+```
 sample1	1	1	1
 sample2	1	2	1
 sample3	2	1	2
 ```
 
 ```sh
-mrtree-rs --input clusters.tsv --output reconciled.tsv --augment-path
+mrtree-rs clusters.tsv reconciled.tsv --augment-path
 ```
 
-```text
+```
 sample1	1	1	1
 sample2	1	1	1
 sample3	2	-1	2
