@@ -1,79 +1,129 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use rayon::ThreadPool;
+use rayon::prelude::*;
 
 use super::paths::{PathId, PathStore};
 use crate::model::{Edge, NodeId, PathLabel};
 
-pub(super) fn construct_tree_from_ids(path_store: &PathStore, path_ids: &[PathId]) -> Vec<Edge> {
+const MIN_EDGE_PAIRS_PER_TASK: usize = 16_384;
+
+pub(super) fn collect_bad_edges_from_ids(
+    path_store: &PathStore,
+    path_ids: &[PathId],
+    thread_pool: Option<&ThreadPool>,
+) -> Vec<Edge> {
     if path_ids.is_empty() {
         return Vec::new();
     }
 
     let n_layers = path_store.get(path_ids[0]).len();
-    let mut edges = Vec::with_capacity(path_ids.len().saturating_mul(n_layers.saturating_sub(1)));
+    let layer_pairs = thread_pool.map_or_else(
+        || collect_layer_pairs_serial(path_store, path_ids, n_layers),
+        |pool| collect_layer_pairs_parallel(path_store, path_ids, n_layers, pool),
+    );
 
-    for layer in 0..(n_layers - 1) {
-        extend_layer_edges(
-            &mut edges,
-            path_ids
-                .iter()
-                .map(|&path_id| path_store.get(path_id).as_slice()),
-            layer,
-            path_ids.len(),
-        );
+    collect_bad_edges_from_layer_pairs(layer_pairs)
+}
+
+type LayerPairs = Vec<Vec<(PathLabel, PathLabel)>>;
+
+fn append_path_pairs(layer_pairs: &mut LayerPairs, path: &[PathLabel]) {
+    for layer in 0..layer_pairs.len() {
+        layer_pairs[layer].push((path[layer + 1], path[layer]));
+    }
+}
+
+fn collect_layer_pairs_serial(
+    path_store: &PathStore,
+    path_ids: &[PathId],
+    n_layers: usize,
+) -> LayerPairs {
+    let mut layer_pairs = (0..n_layers.saturating_sub(1))
+        .map(|_| Vec::with_capacity(path_ids.len()))
+        .collect::<LayerPairs>();
+
+    for &path_id in path_ids {
+        append_path_pairs(&mut layer_pairs, path_store.get(path_id).as_slice());
+    }
+
+    layer_pairs
+}
+
+fn collect_layer_pairs_parallel(
+    path_store: &PathStore,
+    path_ids: &[PathId],
+    n_layers: usize,
+    thread_pool: &ThreadPool,
+) -> LayerPairs {
+    let n_threads = thread_pool.current_num_threads();
+    let estimated_edge_pairs = path_ids.len().saturating_mul(n_layers.saturating_sub(1));
+    if n_threads <= 1 || estimated_edge_pairs < n_threads.saturating_mul(MIN_EDGE_PAIRS_PER_TASK) {
+        return collect_layer_pairs_serial(path_store, path_ids, n_layers);
+    }
+
+    let min_paths_per_split = (MIN_EDGE_PAIRS_PER_TASK / n_layers.saturating_sub(1).max(1)).max(1);
+    let make_layer_pairs = || {
+        (0..n_layers.saturating_sub(1))
+            .map(|_| Vec::new())
+            .collect::<LayerPairs>()
+    };
+    thread_pool.install(|| {
+        path_ids
+            .par_iter()
+            .copied()
+            .with_min_len(min_paths_per_split)
+            .fold(make_layer_pairs, |mut layer_pairs, path_id| {
+                append_path_pairs(&mut layer_pairs, path_store.get(path_id).as_slice());
+                layer_pairs
+            })
+            .reduce(make_layer_pairs, |mut left, right| {
+                for (left_layer, right_layer) in left.iter_mut().zip(right) {
+                    left_layer.extend(right_layer);
+                }
+                left
+            })
+    })
+}
+
+fn collect_bad_edges_from_layer_pairs(layer_pairs: LayerPairs) -> Vec<Edge> {
+    let mut edges = Vec::new();
+
+    for (layer, mut pairs) in layer_pairs.into_iter().enumerate() {
+        if pairs.is_empty() {
+            continue;
+        }
+
+        pairs.sort_unstable();
+        pairs.dedup();
+
+        let mut start = 0;
+        while start < pairs.len() {
+            let child = pairs[start].0;
+            let mut end = start + 1;
+            while end < pairs.len() && pairs[end].0 == child {
+                end += 1;
+            }
+
+            if end - start > 1 {
+                for &(child, parent) in &pairs[start..end] {
+                    edges.push(Edge {
+                        start: NodeId {
+                            layer,
+                            label: parent,
+                        },
+                        end: NodeId {
+                            layer: layer + 1,
+                            label: child,
+                        },
+                    });
+                }
+            }
+
+            start = end;
+        }
     }
 
     edges
 }
-
-pub(super) fn get_bad_nodes(edges: &[Edge]) -> BTreeSet<NodeId> {
-    let mut first_parent_by_child = HashMap::<NodeId, NodeId>::with_capacity(edges.len());
-    let mut bad_children = HashSet::<NodeId>::with_capacity(edges.len());
-
-    for edge in edges {
-        match first_parent_by_child.get(&edge.end) {
-            Some(parent) if parent != &edge.start => {
-                bad_children.insert(edge.end.clone());
-            }
-            Some(_) => {}
-            None => {
-                first_parent_by_child.insert(edge.end.clone(), edge.start.clone());
-            }
-        }
-    }
-
-    bad_children.into_iter().collect()
-}
-
-fn extend_layer_edges<'a, I>(edges: &mut Vec<Edge>, paths: I, layer: usize, path_count: usize)
-where
-    I: IntoIterator<Item = &'a [PathLabel]>,
-{
-    let mut unique_edges = HashSet::<(PathLabel, PathLabel)>::with_capacity(path_count);
-
-    for path in paths {
-        let parent = path[layer];
-        let child = path[layer + 1];
-        unique_edges.insert((child, parent));
-    }
-
-    let mut layer_edges = unique_edges.into_iter().collect::<Vec<_>>();
-    layer_edges.sort_unstable_by_key(|(child, parent)| (*child, *parent));
-
-    edges.reserve(layer_edges.len());
-    for (child, parent) in layer_edges {
-        edges.push(Edge {
-            start: NodeId {
-                layer,
-                label: parent,
-            },
-            end: NodeId {
-                layer: layer + 1,
-                label: child,
-            },
-        });
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,27 +143,36 @@ mod tests {
         (store, path_ids)
     }
 
+    fn edge(parent_layer: usize, parent: u64, child_layer: usize, child: u64) -> Edge {
+        Edge {
+            start: NodeId {
+                layer: parent_layer,
+                label: real(parent),
+            },
+            end: NodeId {
+                layer: child_layer,
+                label: real(child),
+            },
+        }
+    }
+
     #[test]
-    fn get_bad_nodes_returns_children_with_multiple_parents() {
+    fn collect_bad_edges_from_ids_returns_edges_for_children_with_multiple_parents() {
         let input = vec![
             vec![real(1), real(1)],
             vec![real(2), real(1)],
             vec![real(2), real(2)],
         ];
         let (store, path_ids) = store_from_paths(&input);
-        let edges = construct_tree_from_ids(&store, &path_ids);
 
         assert_eq!(
-            get_bad_nodes(&edges),
-            BTreeSet::from([NodeId {
-                layer: 1,
-                label: real(1),
-            }])
+            collect_bad_edges_from_ids(&store, &path_ids, None),
+            vec![edge(0, 1, 1, 1), edge(0, 2, 1, 1)]
         );
     }
 
     #[test]
-    fn construct_tree_orders_edges_by_layer_then_child_then_parent() {
+    fn collect_bad_edges_from_ids_orders_edges_by_layer_then_child_then_parent() {
         let input = vec![
             vec![real(2), real(2), real(1)],
             vec![real(1), real(2), real(2)],
@@ -121,50 +180,27 @@ mod tests {
             vec![real(2), real(1), real(1)],
         ];
         let (store, path_ids) = store_from_paths(&input);
-        let edges = construct_tree_from_ids(&store, &path_ids);
-
-        let edge_order = edges
-            .iter()
-            .map(|edge| (edge.start.layer, edge.start.label, edge.end.label))
-            .collect::<Vec<_>>();
 
         assert_eq!(
-            edge_order,
+            collect_bad_edges_from_ids(&store, &path_ids, None),
             vec![
-                (0, real(1), real(1)),
-                (0, real(2), real(1)),
-                (0, real(1), real(2)),
-                (0, real(2), real(2)),
-                (1, real(1), real(1)),
-                (1, real(2), real(1)),
-                (1, real(1), real(2)),
-                (1, real(2), real(2)),
+                edge(0, 1, 1, 1),
+                edge(0, 2, 1, 1),
+                edge(0, 1, 1, 2),
+                edge(0, 2, 1, 2),
+                edge(1, 1, 2, 1),
+                edge(1, 2, 2, 1),
+                edge(1, 1, 2, 2),
+                edge(1, 2, 2, 2),
             ]
         );
     }
 
     #[test]
-    fn get_bad_nodes_ignores_duplicate_edges_from_same_parent() {
-        let parent = NodeId {
-            layer: 0,
-            label: real(1),
-        };
-        let child = NodeId {
-            layer: 1,
-            label: real(2),
-        };
+    fn collect_bad_edges_from_ids_ignores_duplicate_edges_from_same_parent() {
+        let input = vec![vec![real(1), real(2)], vec![real(1), real(2)]];
+        let (store, path_ids) = store_from_paths(&input);
 
-        let edges = vec![
-            Edge {
-                start: parent.clone(),
-                end: child.clone(),
-            },
-            Edge {
-                start: parent,
-                end: child,
-            },
-        ];
-
-        assert!(get_bad_nodes(&edges).is_empty());
+        assert!(collect_bad_edges_from_ids(&store, &path_ids, None).is_empty());
     }
 }

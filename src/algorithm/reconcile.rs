@@ -4,8 +4,8 @@ use std::collections::{BTreeSet, HashMap};
 use float_cmp::approx_eq;
 #[cfg(test)]
 use float_cmp::assert_approx_eq;
-use rayon::prelude::*;
 use rayon::ThreadPool;
+use rayon::prelude::*;
 
 use super::paths;
 use super::tree;
@@ -166,26 +166,21 @@ impl<'a> PreparedRound<'a> {
         labels: &LabelMatrix,
         thread_pool: Option<&ThreadPool>,
     ) -> Self {
-        let feasible_paths = feasible_path_ids
-            .iter()
-            .copied()
-            .map(|path_id| path_store.get(path_id).as_slice())
-            .collect::<Vec<_>>();
-        let feasible_path_count = feasible_paths.len();
+        let feasible_path_count = feasible_path_ids.len();
         let mut child_group_index_by_node = HashMap::with_capacity(candidates.len());
         let mut child_groups = Vec::with_capacity(candidates.len());
         let mut child_layers = Vec::with_capacity(candidates.len());
         for edge in candidates {
+            if child_layers.last().copied() != Some(edge.end.layer) {
+                child_layers.push(edge.end.layer);
+            }
             child_group_index_by_node
                 .entry(edge.end.clone())
                 .or_insert_with(|| {
-                    child_layers.push(edge.end.layer);
                     child_groups.push(ChildGroup::default());
                     child_groups.len() - 1
                 });
         }
-        child_layers.sort_unstable();
-        child_layers.dedup();
 
         for row in 0..assigned_state.len() {
             let current_path = path_store.get(assigned_state.path_id(row));
@@ -213,13 +208,14 @@ impl<'a> PreparedRound<'a> {
             child_groups,
             jobs,
         };
-        prepared.maybe_build_distance_tables(&feasible_paths, labels, thread_pool);
+        prepared.maybe_build_distance_tables(feasible_path_ids, path_store, labels, thread_pool);
         prepared
     }
 
     fn maybe_build_distance_tables(
         &mut self,
-        feasible_paths: &[&[PathLabel]],
+        feasible_path_ids: &[paths::PathId],
+        path_store: &'a paths::PathStore,
         labels: &LabelMatrix,
         thread_pool: Option<&ThreadPool>,
     ) {
@@ -234,12 +230,17 @@ impl<'a> PreparedRound<'a> {
             return;
         }
 
+        let feasible_paths = feasible_path_ids
+            .iter()
+            .copied()
+            .map(|path_id| path_store.get(path_id).as_slice())
+            .collect::<Vec<_>>();
         let build_distance_table = |group: &mut ChildGroup| {
             let mut distances =
                 Vec::with_capacity(group.rows.len().saturating_mul(feasible_paths.len()));
             for &row in &group.rows {
                 let row_labels = labels.row(row);
-                for feasible_path in feasible_paths {
+                for &feasible_path in &feasible_paths {
                     distances.push(
                         u32::try_from(paths::path_distance(row_labels, feasible_path))
                             .expect("path distance should fit in u32"),
@@ -350,21 +351,21 @@ impl ReconciliationState {
         paths::materialize_paths(self.assigned_state.assigned_path_ids(), &self.path_store)
     }
 
-    fn collect_round_candidates(&self) -> Option<RoundCandidates> {
-        let current_tree = tree::construct_tree_from_ids(
-            &self.path_store,
-            self.assigned_state.assigned_path_ids(),
-        );
-        let bad_nodes = tree::get_bad_nodes(&current_tree);
-        if bad_nodes.is_empty() {
+    fn collect_round_candidates(
+        &self,
+        thread_pool: Option<&ThreadPool>,
+    ) -> Option<RoundCandidates> {
+        let active_path_ids = self
+            .assigned_state
+            .rows_by_path
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut candidates =
+            tree::collect_bad_edges_from_ids(&self.path_store, &active_path_ids, thread_pool);
+        if candidates.is_empty() {
             return None;
         }
-
-        let mut candidates = current_tree
-            .iter()
-            .filter(|edge| bad_nodes.contains(&edge.end))
-            .cloned()
-            .collect::<Vec<_>>();
         let lowest_layers = two_shallowest_layers(&candidates);
         candidates.retain(|edge| lowest_layers.contains(&edge.start.layer));
 
@@ -473,7 +474,7 @@ pub(crate) fn run(
     };
 
     loop {
-        let Some(round) = state.collect_round_candidates() else {
+        let Some(round) = state.collect_round_candidates(thread_pool.as_ref()) else {
             return Ok(state.materialize_output());
         };
 
@@ -895,9 +896,8 @@ mod tests {
         assert!(paths.iter().all(|path| path.len() == expected_cols));
 
         let (store, state) = assigned_state(paths);
-        let edges = tree::construct_tree_from_ids(&store, state.assigned_path_ids());
         assert!(
-            tree::get_bad_nodes(&edges).is_empty(),
+            tree::collect_bad_edges_from_ids(&store, state.assigned_path_ids(), None).is_empty(),
             "reconciled output should not contain multi-parent nodes"
         );
     }
@@ -1049,7 +1049,7 @@ mod tests {
         let state = ReconciliationState::new(&labels);
 
         let round = state
-            .collect_round_candidates()
+            .collect_round_candidates(None)
             .expect("conflicting input should produce a reconciliation round");
 
         assert_eq!(round.lowest_layers, vec![0, 1]);
@@ -1062,6 +1062,36 @@ mod tests {
                 edge(1, 3, 2, 2),
             ]
         );
+    }
+
+    #[test]
+    fn collect_round_candidates_ignores_duplicate_assigned_rows() {
+        let duplicate_paths = vec![
+            path(&[1, 1, 1, 1]),
+            path(&[1, 1, 1, 1]),
+            path(&[2, 1, 2, 2]),
+            path(&[2, 1, 2, 2]),
+            path(&[3, 3, 2, 3]),
+            path(&[4, 4, 4, 3]),
+        ];
+        let unique_paths = vec![
+            path(&[1, 1, 1, 1]),
+            path(&[2, 1, 2, 2]),
+            path(&[3, 3, 2, 3]),
+            path(&[4, 4, 4, 3]),
+        ];
+        let duplicate_labels = labels_from_paths(&duplicate_paths);
+        let unique_labels = labels_from_paths(&unique_paths);
+
+        let duplicate_round = ReconciliationState::new(&duplicate_labels)
+            .collect_round_candidates(None)
+            .expect("duplicate-heavy conflicting input should produce a reconciliation round");
+        let unique_round = ReconciliationState::new(&unique_labels)
+            .collect_round_candidates(None)
+            .expect("deduped conflicting input should produce a reconciliation round");
+
+        assert_eq!(duplicate_round.lowest_layers, unique_round.lowest_layers);
+        assert_eq!(duplicate_round.candidates, unique_round.candidates);
     }
 
     #[test]
