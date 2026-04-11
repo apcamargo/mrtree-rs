@@ -90,7 +90,7 @@ mrtree-rs [OPTIONS] [INPUT] [OUTPUT]
 | `INPUT` | Input TSV file | `-` (stdin) |
 | `OUTPUT` | Output TSV file | `-` (stdout) |
 | `--header` | Treat the first row as a header and emit a header row on output | off |
-| `--max-k <N>` | Keep only clustering columns where the number of clusters (`K`) is less than `N` | no limit |
+| `--max-k <N>` | Keep only clustering columns where the number of clusters (`K`) is ≤ `N` | no limit |
 | `--consensus` | Combine repeated clustering levels with the same `K` (same number of clusters) | off |
 | `--sample-weighting` | Give more weight to samples from smaller clusters | off |
 | `--augment-path` | Enable synthetic path augmentation | off |
@@ -134,7 +134,7 @@ mrtree-rs clusters.tsv reconciled.tsv --header
 
 ### Filter high-resolution levels
 
-Use `--max-k` to ignore very fine clustering levels before reconciliation. For example, `--max-k 20` keeps only columns with fewer than `20` clusters.
+Use `--max-k` to ignore very fine clustering levels before reconciliation. For example, `--max-k 20` keeps only columns with at most `20` clusters.
 
 ```sh
 mrtree-rs clusters.tsv reconciled.tsv --max-k 20

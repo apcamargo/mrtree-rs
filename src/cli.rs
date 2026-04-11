@@ -42,7 +42,7 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Clone, Args)]
 pub(crate) struct PreprocessArgs {
-    /// Keep only clustering columns where the number of clusters (K) is < N
+    /// Keep only clustering columns where the number of clusters (K) is ≤ N
     #[arg(long = "max-k", value_name = "N", help_heading = "Preprocessing")]
     pub(crate) max_k: Option<usize>,
 

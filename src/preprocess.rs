@@ -69,7 +69,7 @@ pub fn prepare(input: InputTable, options: &PrepareOptions) -> crate::Result<Pre
         .filter(|&column| {
             options
                 .max_k
-                .is_none_or(|limit| ks_by_column[column] < limit)
+                .is_none_or(|limit| ks_by_column[column] <= limit)
         })
         .collect::<Vec<_>>();
 
