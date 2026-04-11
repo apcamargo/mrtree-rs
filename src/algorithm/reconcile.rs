@@ -1,6 +1,9 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
+use float_cmp::approx_eq;
+#[cfg(test)]
+use float_cmp::assert_approx_eq;
 use rayon::ThreadPool;
 use rayon::prelude::*;
 
@@ -832,7 +835,7 @@ fn has_effective_weighting(sample_weights: &[f64]) -> bool {
         return false;
     };
 
-    rest.iter().any(|&weight| weight != first)
+    rest.iter().any(|&weight| !approx_eq!(f64, weight, first))
 }
 
 #[cfg(test)]
@@ -1094,7 +1097,7 @@ mod tests {
 
         let cost = candidate_cost(&prepared.jobs[0], &prepared, &inputs);
 
-        assert_eq!(cost, 2.0);
+        assert_approx_eq!(f64, cost, 2.0);
     }
 
     #[test]
@@ -1356,11 +1359,13 @@ mod tests {
             &weights,
         );
 
-        assert_eq!(
+        assert_approx_eq!(
+            f64,
             candidate_cost(&cached_prepared.jobs[0], &cached_prepared, &inputs),
             expected
         );
-        assert_eq!(
+        assert_approx_eq!(
+            f64,
             candidate_cost(&uncached_prepared.jobs[0], &uncached_prepared, &inputs),
             expected
         );

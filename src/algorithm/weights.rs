@@ -29,6 +29,7 @@ pub(crate) fn compute_sample_weights(labels: &LabelMatrix) -> Vec<f64> {
 mod tests {
     use super::*;
     use crate::model::RealLabel;
+    use float_cmp::assert_approx_eq;
 
     #[test]
     fn computes_corrected_inverse_cluster_size_weights() {
@@ -49,9 +50,9 @@ mod tests {
 
         let weights = compute_sample_weights(&labels);
 
-        assert!((weights[0] - 1.0 / 5.0_f64.sqrt()).abs() < 1e-12);
-        assert!((weights[2] - 0.5).abs() < 1e-12);
-        assert!((weights[3] - 1.0 / 2.0_f64.sqrt()).abs() < 1e-12);
+        assert_approx_eq!(f64, weights[0], 1.0 / 5.0_f64.sqrt());
+        assert_approx_eq!(f64, weights[2], 0.5);
+        assert_approx_eq!(f64, weights[3], 1.0 / 2.0_f64.sqrt());
         assert!(
             weights[3] > weights[0],
             "rare-cluster rows should receive more weight"
