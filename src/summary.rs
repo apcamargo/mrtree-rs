@@ -48,17 +48,17 @@ pub(crate) fn summarize_output(
             )));
         }
 
-        let mut row_reassigned = false;
+        let mut reassigned = false;
         let original_row = effective.labels().row(row_idx);
         for (level, &path_label) in path.iter().enumerate() {
             clusters_by_level[level].insert(path_label);
             if path_label != PathLabel::Real(original_row[level]) {
                 reassignments_per_level[level] += 1;
-                row_reassigned = true;
+                reassigned = true;
             }
         }
 
-        if row_reassigned {
+        if reassigned {
             rows_reassigned += 1;
         }
     }
