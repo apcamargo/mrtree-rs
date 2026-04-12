@@ -56,6 +56,27 @@ graph TD
 
 The output keeps the same samples in the same order, but adjusts the cluster labels so the levels describe a cleaner hierarchy.
 
+## Algorithm
+
+`mrtree-rs` reconciles a label matrix with a greedy procedure. Instead of enumerating every possible consistent hierarchy, it repeatedly evaluates candidate fixes for the next inconsistency and applies the one with the lowest score for that round. An inconsistency occurs when a finer-resolution cluster appears under more than one broader cluster at the level above, even though a clean hierarchy requires it to be nested within exactly one broader cluster.
+
+Each reconciliation round proceeds as follows:
+
+1. Find all current inconsistencies in the hierarchy.
+2. Keep only the first two inconsistent level pairs when scanning from coarse to fine. This makes the procedure effectively top-down while still allowing candidates from both pairs to compete in the same round.
+3. For each candidate parent-child relation at those levels, build the valid paths that:
+   - Preserve paths that already agree with the relation.
+   - Discard paths in which the same finer-resolution cluster appears under a different broader cluster.
+   - Recombine the prefix above the inconsistency with a compatible deeper suffix from another path, preserving lower-level structure when possible.
+4. For each sample currently assigned to the finer-resolution cluster in that candidate, choose the remaining path with the smallest Hamming distance to the sample's original input labels.
+5. Score the candidate by summing, over those samples, the sample weight multiplied by the number of levels that would change between the sample's current assigned path and its chosen replacement path.
+6. Apply the candidate with the lowest total score, break ties deterministically, reassign only the rows whose current parent conflicts with the selected relation, and repeat until every finer-resolution cluster appears under exactly one broader cluster.
+
+Two parameters affect this procedure:
+
+- `--sample-weighting` computes one weight per sample before the greedy rounds begin, using the label matrix that enters reconciliation. If `--consensus` is enabled, that means the consensus-reduced matrix. Smaller clusters receive larger weights, making changes that disrupt those groups more expensive. For sample $i$, the weight is $w_i = \left(\sum_{\ell=1}^{L} \lvert C_{\ell}(i) \rvert\right)^{-0.5}$, where $\lvert C_{\ell}(i) \rvert$ is the size of the cluster containing $i$ at level $\ell$.
+- `--augment-path` introduces placeholder labels written as `-1` when this preserves structure that would otherwise be forced into a less informative hierarchy. `-1` represents a synthetic intermediate assignment, not a real input cluster label.
+
 ## Installation
 
 `mrtree-rs` binaries are available for download in the [releases](https://github.com/apcamargo/mrtree-rs/releases/) section of this repository. Alternatively, you can install it from Bioconda using [Pixi](https://pixi.sh/):
