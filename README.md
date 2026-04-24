@@ -117,7 +117,7 @@ mrtree-rs [OPTIONS] [INPUT] [OUTPUT]
 | `--augment-path` | Enable synthetic path augmentation | off |
 | `--seed <N>` | Seed for deterministic consensus clustering | `0` |
 | `--threads <N>` | Number of worker threads; `0` uses all available threads | `1` |
-| `-v`, `--verbose` | Emit preprocessing and progress details to stderr | off |
+| `-v`, `--verbose` | Repeat to increase stderr logging verbosity (`-v` INFO, `-vv` DEBUG, `-vvv` TRACE) | ERROR and WARN |
 | `-h`, `--help` | Print help | |
 | `-V`, `--version` | Print version | |
 

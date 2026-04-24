@@ -16,7 +16,7 @@ where
         .from_reader(BufReader::new(reader));
 
     let (sample_header, cluster_headers, mut expected_fields) = if header {
-        let headers = csv_reader.headers()?.clone();
+        let headers = csv_reader.headers().map_err(tsv_read_error)?.clone();
         if headers.len() < 3 {
             return Err(MrtreeError::InputHasTooFewColumns);
         }
@@ -37,10 +37,11 @@ where
 
     let mut sample_ids = Vec::new();
     let mut labels = Vec::new();
-    let mut line_number = if header { 2 } else { 1 };
+    let first_data_line = if header { 2 } else { 1 };
 
-    for record in csv_reader.records() {
-        let record = record?;
+    for (row_idx, record) in csv_reader.records().enumerate() {
+        let line_number = first_data_line + row_idx;
+        let record = record.map_err(tsv_read_error)?;
         validate_record_width(&record, expected_fields, line_number)?;
         expected_fields = Some(record.len());
 
@@ -51,7 +52,6 @@ where
         let row_labels = parse_cluster_row(&record, line_number, header)?;
         sample_ids.push(record.get(0).unwrap_or_default().to_owned());
         labels.extend(row_labels);
-        line_number += 1;
     }
 
     if sample_ids.is_empty() {
@@ -81,13 +81,7 @@ pub fn write_tsv<W>(
 where
     W: Write,
 {
-    if output.len() != effective.sample_ids().len() {
-        return Err(MrtreeError::InternalAlgorithmInvariantViolation(format!(
-            "output contains {} rows, expected {}",
-            output.len(),
-            effective.sample_ids().len()
-        )));
-    }
+    effective.validate_output_row_count(output.len())?;
 
     let mut csv_writer = WriterBuilder::new()
         .delimiter(b'\t')
@@ -95,27 +89,29 @@ where
         .from_writer(BufWriter::new(writer));
 
     if include_header {
-        csv_writer.write_record(build_header_row(effective))?;
+        csv_writer
+            .write_record(build_header_row(effective))
+            .map_err(tsv_write_error)?;
     }
 
-    for (row_idx, sample_id) in effective.sample_ids().iter().enumerate() {
-        let path = &output[row_idx];
-        if path.len() != effective.labels().n_cols() {
-            return Err(MrtreeError::InternalAlgorithmInvariantViolation(format!(
-                "output row {row_idx} has {} labels, expected {}",
-                path.len(),
-                effective.labels().n_cols()
-            )));
-        }
-
+    for (row_idx, (sample_id, path)) in effective.sample_ids().iter().zip(output).enumerate() {
+        effective.validate_output_path(row_idx, path)?;
         let mut row = Vec::with_capacity(path.len() + 1);
         row.push(sample_id.clone());
         row.extend(path.iter().map(|label| serialize_path_label(*label)));
-        csv_writer.write_record(row)?;
+        csv_writer.write_record(row).map_err(tsv_write_error)?;
     }
 
-    csv_writer.flush()?;
+    csv_writer.flush().map_err(tsv_write_error)?;
     Ok(())
+}
+
+fn tsv_read_error(error: impl std::fmt::Display) -> MrtreeError {
+    MrtreeError::TsvRead(error.to_string())
+}
+
+fn tsv_write_error(error: impl std::fmt::Display) -> MrtreeError {
+    MrtreeError::TsvWrite(error.to_string())
 }
 
 fn build_header_row(effective: &EffectiveTable) -> Vec<String> {
@@ -272,6 +268,75 @@ mod tests {
         let error = read_tsv(&b""[..], false).expect_err("empty input should fail");
 
         assert!(matches!(error, MrtreeError::EmptyInput));
+    }
+
+    #[test]
+    fn read_tsv_headerless_invalid_first_row_reports_line_one_with_header_hint() {
+        let error = read_tsv(&b"sample\tk1\tk2\n"[..], false)
+            .expect_err("header-like first row should fail without --header");
+
+        assert!(matches!(
+            error,
+            MrtreeError::InvalidClusterLabel {
+                line: 1,
+                column: 2,
+                value,
+                hint,
+            } if value == "k1"
+                && hint == "; input appears to have a header row; retry with --header"
+        ));
+    }
+
+    #[test]
+    fn read_tsv_headered_invalid_first_data_row_reports_line_two() {
+        let error = read_tsv(&b"sample\tk1\tk2\nrow_a\tx\t1\n"[..], true)
+            .expect_err("invalid first data row should preserve physical line number");
+
+        assert!(matches!(
+            error,
+            MrtreeError::InvalidClusterLabel {
+                line: 2,
+                column: 2,
+                value,
+                hint,
+            } if value == "x" && hint.is_empty()
+        ));
+    }
+
+    #[test]
+    fn read_tsv_headered_ragged_second_data_row_reports_line_three() {
+        let error = read_tsv(&b"sample\tk1\tk2\nrow_a\t1\t2\nrow_b\t3\t4\t5\n"[..], true)
+            .expect_err("ragged row should report physical file line number");
+
+        assert!(matches!(
+            error,
+            MrtreeError::RaggedRow {
+                line: 3,
+                expected: 3,
+                actual: 4,
+            }
+        ));
+    }
+
+    #[test]
+    fn write_tsv_rejects_output_with_wrong_row_count() {
+        let effective = headerless_effective_table(vec![1, 3]);
+        let error = write_tsv(
+            Vec::new(),
+            false,
+            &effective,
+            &[vec![
+                PathLabel::Real(RealLabel::new(1)),
+                PathLabel::Real(RealLabel::new(10)),
+            ]],
+        )
+        .expect_err("mismatched output row count should fail");
+
+        assert!(matches!(
+            error,
+            MrtreeError::InternalAlgorithmInvariantViolation(message)
+                if message == "output contains 1 rows, expected 2"
+        ));
     }
 
     #[test]

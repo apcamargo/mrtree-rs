@@ -1,5 +1,5 @@
 use clap::{
-    Args, Parser,
+    ArgAction, Args, Parser,
     builder::styling::{AnsiColor, Style, Styles},
 };
 
@@ -85,7 +85,7 @@ pub(crate) struct RuntimeArgs {
     )]
     pub(crate) threads: usize,
 
-    /// Emit preprocessing and progress details to stderr
-    #[arg(short, long, help_heading = "Runtime and logging")]
-    pub(crate) verbose: bool,
+    /// Repeat to increase logging verbosity (-v INFO, -vv DEBUG, -vvv TRACE)
+    #[arg(short, long, action = ArgAction::Count, help_heading = "Runtime and logging")]
+    pub(crate) verbose: u8,
 }

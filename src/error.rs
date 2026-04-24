@@ -2,35 +2,35 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MrtreeError {
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    #[error("Failed to read TSV input: {0}")]
+    TsvRead(String),
 
-    #[error(transparent)]
-    Csv(#[from] csv::Error),
+    #[error("Failed to write TSV output: {0}")]
+    TsvWrite(String),
 
-    #[error("input contains no data rows")]
+    #[error("Input contains no data rows")]
     EmptyInput,
 
-    #[error("input contains only a header row and no samples")]
+    #[error("Input contains only a header row and no samples")]
     HeaderOnlyInput,
 
     #[error(
-        "input must contain at least three columns: one sample ID column and at least two clustering columns"
+        "Input must contain at least three columns: one sample ID column and at least two clustering columns"
     )]
     InputHasTooFewColumns,
 
-    #[error("line {line} has {actual} fields, expected {expected}")]
+    #[error("Line {line} has {actual} fields, expected {expected}")]
     RaggedRow {
         line: usize,
         expected: usize,
         actual: usize,
     },
 
-    #[error("missing clustering label at line {line}, column {column}")]
+    #[error("Missing clustering label at line {line}, column {column}")]
     MissingClusterLabel { line: usize, column: usize },
 
     #[error(
-        "negative cluster label at line {line}, column {column}: {value}; real cluster labels must be non-negative integers and -1 is reserved for synthetic augmented output"
+        "Negative cluster label at line {line}, column {column}: {value}; real cluster labels must be non-negative integers and -1 is reserved for synthetic augmented output"
     )]
     NegativeClusterLabel {
         line: usize,
@@ -38,7 +38,7 @@ pub enum MrtreeError {
         value: String,
     },
 
-    #[error("invalid integer label at line {line}, column {column}: {value}{hint}")]
+    #[error("Invalid integer label at line {line}, column {column}: {value}{hint}")]
     InvalidClusterLabel {
         line: usize,
         column: usize,
@@ -46,25 +46,25 @@ pub enum MrtreeError {
         hint: String,
     },
 
-    #[error("fewer than two clustering columns remain after --max-k filtering")]
+    #[error("Fewer than two clustering columns remain after --max-k filtering")]
     TooFewLayersAfterFiltering,
 
-    #[error("fewer than two effective layers remain after same-K consensus reduction")]
+    #[error("Fewer than two effective layers remain after same-K consensus reduction")]
     ConsensusRequiresAtLeastTwoLayers,
 
     #[error(
-        "input table row count mismatch: label matrix has {label_rows} rows but sample IDs contain {sample_ids}"
+        "Input table row count mismatch: label matrix has {label_rows} rows but sample IDs contain {sample_ids}"
     )]
     InputRowCountMismatch {
         label_rows: usize,
         sample_ids: usize,
     },
 
-    #[error("cluster header count mismatch: expected {expected}, got {actual}")]
+    #[error("Cluster header count mismatch: expected {expected}, got {actual}")]
     ClusterHeaderCountMismatch { expected: usize, actual: usize },
 
     #[error(
-        "effective table metadata count mismatch: expected {expected} columns, got {original_column_indices} original indices and {ks} K values"
+        "Effective table metadata count mismatch: expected {expected} columns, got {original_column_indices} original indices and {ks} K values"
     )]
     EffectiveMetadataLengthMismatch {
         expected: usize,
@@ -72,18 +72,18 @@ pub enum MrtreeError {
         ks: usize,
     },
 
-    #[error("sample weight length mismatch: expected {expected}, got {actual}")]
+    #[error("Sample weight length mismatch: expected {expected}, got {actual}")]
     SampleWeightsLengthMismatch { expected: usize, actual: usize },
 
-    #[error("consensus k-means failed: {0}")]
+    #[error("Consensus k-means failed: {0}")]
     ConsensusKMeans(String),
 
-    #[error("consensus SVD failed: {0}")]
+    #[error("Consensus SVD failed: {0}")]
     ConsensusSvd(String),
 
-    #[error("failed to build rayon thread pool: {0}")]
+    #[error("Failed to build rayon thread pool: {0}")]
     ThreadPoolBuild(String),
 
-    #[error("internal algorithm invariant violation: {0}")]
+    #[error("Internal algorithm invariant violation: {0}")]
     InternalAlgorithmInvariantViolation(String),
 }

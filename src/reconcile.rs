@@ -6,7 +6,6 @@ use crate::weights::SampleWeights;
 pub struct ReconcileOptions {
     pub augment_path: bool,
     pub threads: usize,
-    pub verbose: bool,
 }
 
 pub fn reconcile_labels(

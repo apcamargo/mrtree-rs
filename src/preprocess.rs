@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::fmt;
 
+use tracing::{Level, enabled, trace};
+
 use crate::error::MrtreeError;
 use crate::model::{EffectiveTable, InputTable, LabelMatrix};
 
@@ -72,6 +74,19 @@ pub fn prepare(input: InputTable, options: &PrepareOptions) -> crate::Result<Pre
                 .is_none_or(|limit| ks_by_column[column] <= limit)
         })
         .collect::<Vec<_>>();
+    if enabled!(Level::TRACE) {
+        let dropped_levels = (0..labels.n_cols())
+            .filter(|column| !surviving_input_order.contains(column))
+            .collect::<Vec<_>>();
+        trace!(
+            max_k = ?options.max_k,
+            input_levels = labels.n_cols(),
+            ks_by_level = ?ks_by_column,
+            surviving_levels = ?surviving_input_order,
+            dropped_levels = ?dropped_levels,
+            "Preprocess layer filter"
+        );
+    }
 
     if surviving_input_order.len() < 2 {
         return Err(MrtreeError::TooFewLayersAfterFiltering);
@@ -90,6 +105,13 @@ pub fn prepare(input: InputTable, options: &PrepareOptions) -> crate::Result<Pre
         .iter()
         .map(|&column| ks_by_column[column])
         .collect::<Vec<_>>();
+    trace!(
+        surviving_input_order = ?surviving_input_order,
+        canonical_order = ?canonical_indices,
+        ks_by_effective_level = ?ks,
+        reordered = surviving_input_order != canonical_indices,
+        "Preprocess canonical order"
+    );
 
     let reorder_warning = (surviving_input_order != canonical_indices).then(|| ReorderWarning {
         original_order: render_order_labels(cluster_headers.as_deref(), &surviving_input_order),

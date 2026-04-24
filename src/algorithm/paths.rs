@@ -206,6 +206,15 @@ struct PartitionedPaths {
     conflicting_path_ids: Vec<PathId>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PruneSummary {
+    pub selected_paths: usize,
+    pub conflicting_paths: usize,
+    pub unaffected_paths: usize,
+    pub recombined_paths: usize,
+    pub unique_after: usize,
+}
+
 fn partition_paths(path_ids: &[PathId], edge: &Edge, path_store: &PathStore) -> PartitionedPaths {
     let path_len = path_store.get(path_ids[0]).len();
     let mut kept_path_ids = Vec::new();
@@ -236,6 +245,38 @@ fn partition_paths(path_ids: &[PathId], edge: &Edge, path_store: &PathStore) -> 
         selected_path_ids,
         conflicting_path_ids,
     }
+}
+
+pub(super) fn summarize_pruned_paths(
+    path_ids: &[PathId],
+    edge: &Edge,
+    path_store: &PathStore,
+) -> Option<PruneSummary> {
+    if path_ids.is_empty() {
+        return None;
+    }
+
+    let partition = partition_paths(path_ids, edge, path_store);
+    let recombined = recombined_partition_paths(&partition, edge, path_store);
+    let selected_paths = partition.selected_path_ids.len();
+    let conflicting_paths = partition.conflicting_path_ids.len();
+    let unaffected_paths = partition.kept_path_ids.len().saturating_sub(selected_paths);
+    let unique_after = unique_paths(
+        partition
+            .kept_path_ids
+            .iter()
+            .map(|&path_id| path_store.get(path_id).clone())
+            .chain(recombined.iter().cloned()),
+    )
+    .len();
+
+    Some(PruneSummary {
+        selected_paths,
+        conflicting_paths,
+        unaffected_paths,
+        recombined_paths: recombined.len(),
+        unique_after,
+    })
 }
 
 fn recombined_partition_paths(
@@ -527,6 +568,29 @@ mod tests {
                 &[real(2), real(2), real(4)][..],
                 &[real(1), real(1), real(3)][..],
             ]
+        );
+    }
+
+    #[test]
+    fn summarize_pruned_paths_reports_partition_counts() {
+        let input = vec![
+            vec![real(1), real(1), real(1)],
+            vec![real(1), real(1), real(2)],
+            vec![real(2), real(1), real(3)],
+            vec![real(2), real(2), real(4)],
+        ];
+        let candidate = edge(0, 1, 1, 1);
+        let (store, path_ids) = store_from_paths(&input);
+
+        assert_eq!(
+            summarize_pruned_paths(&path_ids, &candidate, &store),
+            Some(PruneSummary {
+                selected_paths: 2,
+                conflicting_paths: 1,
+                unaffected_paths: 1,
+                recombined_paths: 1,
+                unique_after: 4,
+            })
         );
     }
 

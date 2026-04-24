@@ -7,6 +7,7 @@ use linfa_clustering::KMeans;
 use ndarray::Array2;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
+use tracing::{Level, enabled, trace};
 
 use crate::algorithm::weights;
 use crate::error::MrtreeError;
@@ -58,16 +59,33 @@ pub(crate) fn reduce_same_k_groups(
     while group_start < effective.ks().len() {
         let reduced_index = reduced_columns.len();
         let k = effective.ks()[group_start];
+        let group_seed = seed.wrapping_add(reduced_index as u64);
         let mut group_end = group_start + 1;
         while group_end < effective.ks().len() && effective.ks()[group_end] == k {
             group_end += 1;
         }
+        let group_width = group_end - group_start;
+        trace!(
+            reduced_index,
+            source_start = group_start,
+            source_end = group_end,
+            k,
+            group_width,
+            mode = if group_width == 1 {
+                "passthrough"
+            } else {
+                "consensus"
+            },
+            seed = group_seed,
+            sample_weighting,
+            "Consensus same-K group"
+        );
 
         for group in group_mapping.iter_mut().take(group_end).skip(group_start) {
             *group = reduced_index;
         }
 
-        if group_end - group_start == 1 {
+        if group_width == 1 {
             reduced_columns.push(
                 effective
                     .labels()
@@ -84,7 +102,7 @@ pub(crate) fn reduce_same_k_groups(
             &group_labels,
             k,
             sample_weighting,
-            seed.wrapping_add(reduced_index as u64),
+            group_seed,
         )?);
         group_start = group_end;
     }
@@ -106,7 +124,16 @@ fn consensus_column(
     seed: u64,
 ) -> crate::Result<Vec<RealLabel>> {
     if k == 1 {
-        return Ok(vec![RealLabel::new(1); labels.n_rows()]);
+        let assignments = vec![RealLabel::new(1); labels.n_rows()];
+        log_consensus_column_trace(
+            labels,
+            k,
+            seed,
+            sample_weighting,
+            labels.n_cols(),
+            &assignments,
+        );
+        return Ok(assignments);
     }
 
     let mut encoded = build_membership_matrix(labels, k);
@@ -129,10 +156,16 @@ fn consensus_column(
         .fit(&dataset)
         .map_err(|error| MrtreeError::ConsensusKMeans(error.to_string()))?;
     let predictions = model.predict(&embedding);
-
-    Ok(canonicalize_cluster_ids(
-        predictions.iter().copied().collect::<Vec<_>>(),
-    ))
+    let assignments = canonicalize_cluster_ids(predictions.iter().copied().collect::<Vec<_>>());
+    log_consensus_column_trace(
+        labels,
+        k,
+        seed,
+        sample_weighting,
+        encoded.ncols(),
+        &assignments,
+    );
+    Ok(assignments)
 }
 
 fn build_membership_matrix(labels: &LabelMatrix, k: usize) -> Array2<f64> {
@@ -195,6 +228,41 @@ fn canonicalize_cluster_ids(raw_assignments: Vec<usize>) -> Vec<RealLabel> {
             })
         })
         .collect()
+}
+
+fn cluster_sizes_by_label(assignments: &[RealLabel]) -> Vec<usize> {
+    let mut counts = BTreeMap::new();
+    for &label in assignments {
+        *counts.entry(label).or_insert(0_usize) += 1;
+    }
+    counts.into_values().collect()
+}
+
+fn log_consensus_column_trace(
+    labels: &LabelMatrix,
+    k: usize,
+    seed: u64,
+    sample_weighting: bool,
+    encoded_cols: usize,
+    assignments: &[RealLabel],
+) {
+    if !enabled!(Level::TRACE) {
+        return;
+    }
+
+    let cluster_sizes = cluster_sizes_by_label(assignments);
+    trace!(
+        rows = labels.n_rows(),
+        source_levels = labels.n_cols(),
+        k,
+        sample_weighting,
+        encoded_rows = labels.n_rows(),
+        encoded_cols,
+        seed,
+        realized_clusters = cluster_sizes.len(),
+        cluster_sizes = ?cluster_sizes,
+        "Consensus column result"
+    );
 }
 
 fn columns_to_matrix(columns: &[Vec<RealLabel>]) -> LabelMatrix {
@@ -357,6 +425,13 @@ mod tests {
 
         assert_eq!(expanded.len(), effective.labels().n_rows());
         assert_eq!(expanded[0].len(), effective.labels().n_cols());
+    }
+
+    #[test]
+    fn cluster_sizes_by_label_uses_canonical_label_order() {
+        let assignments = vec![label(2), label(1), label(2), label(3), label(1)];
+
+        assert_eq!(cluster_sizes_by_label(&assignments), vec![2, 2, 1]);
     }
 
     #[test]

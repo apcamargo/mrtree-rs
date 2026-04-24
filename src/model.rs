@@ -317,4 +317,31 @@ impl EffectiveTable {
     pub fn ks(&self) -> &[usize] {
         &self.ks
     }
+
+    pub(crate) fn validate_output_row_count(&self, actual_rows: usize) -> crate::Result<()> {
+        let expected_rows = self.labels.n_rows();
+        if actual_rows != expected_rows {
+            return Err(MrtreeError::InternalAlgorithmInvariantViolation(format!(
+                "output contains {actual_rows} rows, expected {expected_rows}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn validate_output_path(
+        &self,
+        row_idx: usize,
+        path: &[PathLabel],
+    ) -> crate::Result<()> {
+        let expected_levels = self.labels.n_cols();
+        if path.len() != expected_levels {
+            return Err(MrtreeError::InternalAlgorithmInvariantViolation(format!(
+                "output row {row_idx} has {} labels, expected {expected_levels}",
+                path.len()
+            )));
+        }
+
+        Ok(())
+    }
 }

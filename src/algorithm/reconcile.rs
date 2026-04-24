@@ -6,6 +6,7 @@ use float_cmp::approx_eq;
 use float_cmp::assert_approx_eq;
 use rayon::ThreadPool;
 use rayon::prelude::*;
+use tracing::{Level, debug, enabled, info, trace};
 
 use super::paths;
 use super::tree;
@@ -14,6 +15,7 @@ use crate::model::{Candidate, Edge, LabelMatrix, NodeId, Path, PathLabel, RealLa
 
 const MIN_LABEL_COMPARISONS_PER_TASK: usize = 16_384;
 const MAX_SCORING_DISTANCE_CACHE_BYTES: usize = 128 * 1024 * 1024;
+const CANDIDATE_PREVIEW_LIMIT: usize = 6;
 
 fn available_threads() -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
@@ -142,6 +144,24 @@ struct ReconciliationState {
 struct RoundCandidates {
     candidates: Vec<Edge>,
     lowest_layers: Vec<usize>,
+    active_path_count: usize,
+    bad_edge_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AugmentationSummary {
+    new_layers: Vec<usize>,
+    feasible_before: usize,
+    new_unique_paths: usize,
+    feasible_after: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ApplyOutcome {
+    prune_summary: Option<paths::PruneSummary>,
+    reassigned_rows: usize,
+    feasible_after_prune: usize,
+    feasible_after_finalize: usize,
 }
 
 struct ScoringInputs<'a> {
@@ -155,6 +175,22 @@ struct ScoringInputs<'a> {
 enum ThreadedScoringPlan {
     Serial,
     ParallelChunked { tasks: Vec<CandidateChunkTask> },
+}
+
+impl ThreadedScoringPlan {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Serial => "serial",
+            Self::ParallelChunked { .. } => "parallel-chunked",
+        }
+    }
+
+    fn task_count(&self) -> usize {
+        match self {
+            Self::Serial => 0,
+            Self::ParallelChunked { tasks } => tasks.len(),
+        }
+    }
 }
 
 impl<'a> PreparedRound<'a> {
@@ -227,8 +263,21 @@ impl<'a> PreparedRound<'a> {
             .saturating_mul(self.feasible_path_count)
             .saturating_mul(std::mem::size_of::<u32>());
         if cache_bytes == 0 || cache_bytes > MAX_SCORING_DISTANCE_CACHE_BYTES {
+            debug!(
+                cache_bytes,
+                max_cache_bytes = MAX_SCORING_DISTANCE_CACHE_BYTES,
+                skipped = true,
+                "Distance cache decision"
+            );
             return;
         }
+        debug!(
+            cache_bytes,
+            groups = self.child_groups.len(),
+            feasible_paths = self.feasible_path_count,
+            skipped = false,
+            "Distance cache decision"
+        );
 
         let feasible_paths = feasible_path_ids
             .iter()
@@ -366,18 +415,25 @@ impl ReconciliationState {
         if candidates.is_empty() {
             return None;
         }
+        let bad_edge_count = candidates.len();
         let lowest_layers = two_shallowest_layers(&candidates);
         candidates.retain(|edge| lowest_layers.contains(&edge.start.layer));
 
         Some(RoundCandidates {
             candidates,
             lowest_layers,
+            active_path_count: active_path_ids.len(),
+            bad_edge_count,
         })
     }
 
-    fn maybe_augment_feasible_paths(&mut self, lowest_layers: &[usize], augment_path: bool) {
+    fn maybe_augment_feasible_paths(
+        &mut self,
+        lowest_layers: &[usize],
+        augment_path: bool,
+    ) -> Option<AugmentationSummary> {
         if !augment_path {
-            return;
+            return None;
         }
 
         let new_layers = lowest_layers
@@ -385,11 +441,21 @@ impl ReconciliationState {
             .copied()
             .filter(|layer| !self.lowest_done.contains(layer))
             .collect::<Vec<_>>();
+        let mut summary = None;
         if !new_layers.is_empty() {
+            let feasible_before = self.feasible_path_ids.len();
             self.feasible_path_ids =
                 paths::augment_path_ids(&self.feasible_path_ids, &new_layers, &mut self.path_store);
+            let feasible_after = self.feasible_path_ids.len();
+            summary = Some(AugmentationSummary {
+                new_layers,
+                feasible_before,
+                new_unique_paths: feasible_after.saturating_sub(feasible_before),
+                feasible_after,
+            });
         }
         self.lowest_done.extend(lowest_layers.iter().copied());
+        summary
     }
 
     fn apply_selected_candidate(
@@ -399,10 +465,14 @@ impl ReconciliationState {
         labels: &LabelMatrix,
         augment_path: bool,
         lowest_layers: &[usize],
-    ) {
+    ) -> ApplyOutcome {
+        let prune_summary = enabled!(Level::TRACE)
+            .then(|| paths::summarize_pruned_paths(&self.feasible_path_ids, edge, &self.path_store))
+            .flatten();
         self.feasible_path_ids =
             paths::prune_path_ids(&self.feasible_path_ids, edge, &mut self.path_store);
-        reassign_affected_samples(
+        let feasible_after_prune = self.feasible_path_ids.len();
+        let reassigned_rows = reassign_affected_samples(
             edge,
             affected_rows,
             &self.feasible_path_ids,
@@ -428,6 +498,12 @@ impl ReconciliationState {
         } else {
             self.feasible_path_ids = self.assigned_state.realized_path_ids_in_row_order();
         }
+        ApplyOutcome {
+            prune_summary,
+            reassigned_rows,
+            feasible_after_prune,
+            feasible_after_finalize: self.feasible_path_ids.len(),
+        }
     }
 }
 
@@ -436,29 +512,22 @@ pub(crate) fn run(
     sample_weights: &[f64],
     options: crate::reconcile::ReconcileOptions,
 ) -> crate::Result<Vec<Path>> {
-    if labels.n_cols() < 2 {
-        return Err(MrtreeError::InternalAlgorithmInvariantViolation(
-            "reconciliation requires at least two layers".to_owned(),
-        ));
-    }
-
-    if sample_weights.len() != labels.n_rows() {
-        return Err(MrtreeError::SampleWeightsLengthMismatch {
-            expected: labels.n_rows(),
-            actual: sample_weights.len(),
-        });
-    }
+    validate_reconciliation_inputs(labels, sample_weights)?;
 
     let thread_count = resolve_thread_count(options.threads);
-    crate::log_info(
-        options.verbose,
-        format_args!(
-            "Running reconciliation: Rows={}, Levels={}, Weighted={}, Augment path={}",
-            labels.n_rows(),
-            labels.n_cols(),
-            has_effective_weighting(sample_weights),
-            options.augment_path
-        ),
+    let weighted = has_effective_weighting(sample_weights);
+    let trace_enabled = enabled!(Level::TRACE);
+    info!(
+        rows = labels.n_rows(),
+        levels = labels.n_cols(),
+        weighted,
+        augment_path = options.augment_path,
+        "Running reconciliation"
+    );
+    debug!(
+        requested_threads = options.threads,
+        resolved_threads = thread_count,
+        "Resolved worker thread count"
     );
 
     let mut state = ReconciliationState::new(labels);
@@ -472,13 +541,22 @@ pub(crate) fn run(
     } else {
         None
     };
+    let mut round_number = 0_usize;
 
     loop {
         let Some(round) = state.collect_round_candidates(thread_pool.as_ref()) else {
             return Ok(state.materialize_output());
         };
+        round_number += 1;
+        if trace_enabled {
+            trace_round_frontier(round_number, &round);
+        }
 
-        state.maybe_augment_feasible_paths(&round.lowest_layers, options.augment_path);
+        let augmentation =
+            state.maybe_augment_feasible_paths(&round.lowest_layers, options.augment_path);
+        if trace_enabled && let Some(augmentation) = &augmentation {
+            trace_augmentation(round_number, augmentation);
+        }
         let scoring_inputs = ScoringInputs {
             assigned_state: &state.assigned_state,
             path_store: &state.path_store,
@@ -498,6 +576,7 @@ pub(crate) fn run(
             .map_or(ThreadedScoringPlan::Serial, |pool| {
                 plan_threaded_scoring(&prepared_round, labels, pool.current_num_threads())
             });
+        debug_scoring_plan(round_number, prepared_round.jobs.len(), &scoring_plan);
         let selected = select_best_candidate(
             &prepared_round,
             &scoring_plan,
@@ -511,15 +590,46 @@ pub(crate) fn run(
         })?;
 
         let affected_rows = prepared_round.rows_for_job(selected.order).to_vec();
+        if trace_enabled {
+            trace_selected_candidate(
+                round_number,
+                &selected,
+                affected_rows.len(),
+                &prepared_round,
+            );
+        }
         drop(prepared_round);
-        state.apply_selected_candidate(
+        let apply_outcome = state.apply_selected_candidate(
             &selected.edge,
             &affected_rows,
             labels,
             options.augment_path,
             &round.lowest_layers,
         );
+        if trace_enabled {
+            trace_apply_outcome(round_number, &selected, affected_rows.len(), &apply_outcome);
+        }
     }
+}
+
+fn validate_reconciliation_inputs(
+    labels: &LabelMatrix,
+    sample_weights: &[f64],
+) -> crate::Result<()> {
+    if labels.n_cols() < 2 {
+        return Err(MrtreeError::InternalAlgorithmInvariantViolation(
+            "reconciliation requires at least two layers".to_owned(),
+        ));
+    }
+
+    if sample_weights.len() != labels.n_rows() {
+        return Err(MrtreeError::SampleWeightsLengthMismatch {
+            expected: labels.n_rows(),
+            actual: sample_weights.len(),
+        });
+    }
+
+    Ok(())
 }
 
 fn two_shallowest_layers(candidates: &[Edge]) -> Vec<usize> {
@@ -536,6 +646,115 @@ fn compare_candidates(left: &Candidate, right: &Candidate) -> Ordering {
     left.cost
         .total_cmp(&right.cost)
         .then(left.order.cmp(&right.order))
+}
+
+fn render_edge(edge: &Edge) -> String {
+    format!(
+        "{}:{}->{}:{}",
+        edge.start.layer, edge.start.label, edge.end.layer, edge.end.label
+    )
+}
+
+fn trace_round_frontier(round_number: usize, round: &RoundCandidates) {
+    let candidate_preview = round
+        .candidates
+        .iter()
+        .take(CANDIDATE_PREVIEW_LIMIT)
+        .map(render_edge)
+        .collect::<Vec<_>>();
+    trace!(
+        round = round_number,
+        active_paths = round.active_path_count,
+        bad_edges_total = round.bad_edge_count,
+        lowest_layers = ?round.lowest_layers,
+        retained_candidates = round.candidates.len(),
+        candidate_preview = ?candidate_preview,
+        "Round frontier"
+    );
+}
+
+fn trace_augmentation(round_number: usize, augmentation: &AugmentationSummary) {
+    trace!(
+        round = round_number,
+        new_layers = ?augmentation.new_layers,
+        feasible_before = augmentation.feasible_before,
+        new_unique_paths = augmentation.new_unique_paths,
+        feasible_after = augmentation.feasible_after,
+        "Augmented feasible paths"
+    );
+}
+
+fn debug_scoring_plan(
+    round_number: usize,
+    candidate_count: usize,
+    scoring_plan: &ThreadedScoringPlan,
+) {
+    debug!(
+        round = round_number,
+        candidates = candidate_count,
+        plan = scoring_plan.kind(),
+        tasks = scoring_plan.task_count(),
+        "Prepared scoring plan"
+    );
+}
+
+fn trace_selected_candidate(
+    round_number: usize,
+    selected: &Candidate,
+    affected_rows: usize,
+    prepared_round: &PreparedRound<'_>,
+) {
+    let selected_job = &prepared_round.jobs[selected.order];
+    let recombined_paths = selected_job
+        .pruned_paths
+        .iter()
+        .filter(|path| matches!(path, paths::ScoringPathView::Owned(_)))
+        .count();
+    trace!(
+        round = round_number,
+        candidate_count = prepared_round.jobs.len(),
+        selected_order = selected.order,
+        edge_start_layer = selected.edge.start.layer,
+        edge_start_label = %selected.edge.start.label,
+        edge_end_layer = selected.edge.end.layer,
+        edge_end_label = %selected.edge.end.label,
+        cost = selected.cost,
+        child_rows = affected_rows,
+        scoring_paths = selected_job.pruned_paths.len(),
+        recombined_paths,
+        "Selected reconciliation candidate"
+    );
+}
+
+fn trace_apply_outcome(
+    round_number: usize,
+    selected: &Candidate,
+    affected_rows: usize,
+    apply_outcome: &ApplyOutcome,
+) {
+    let prune_summary = apply_outcome.prune_summary.unwrap_or(paths::PruneSummary {
+        selected_paths: 0,
+        conflicting_paths: 0,
+        unaffected_paths: 0,
+        recombined_paths: 0,
+        unique_after: 0,
+    });
+    trace!(
+        round = round_number,
+        edge_start_layer = selected.edge.start.layer,
+        edge_start_label = %selected.edge.start.label,
+        edge_end_layer = selected.edge.end.layer,
+        edge_end_label = %selected.edge.end.label,
+        affected_rows,
+        reassigned_rows = apply_outcome.reassigned_rows,
+        selected_paths = prune_summary.selected_paths,
+        conflicting_paths = prune_summary.conflicting_paths,
+        unaffected_paths = prune_summary.unaffected_paths,
+        recombined_paths = prune_summary.recombined_paths,
+        feasible_after_prune = apply_outcome.feasible_after_prune,
+        feasible_after_finalize = apply_outcome.feasible_after_finalize,
+        "Applied reconciliation candidate"
+    );
 }
 
 fn row_matches_candidate_child(current_path: &[PathLabel], edge: &Edge) -> bool {
@@ -798,19 +1017,26 @@ fn reassign_rows<I>(
     path_store: &paths::PathStore,
     labels: &LabelMatrix,
     assigned_state: &mut AssignedPathState,
-) where
+) -> usize
+where
     I: IntoIterator<Item = usize>,
 {
+    let mut changed_rows = 0_usize;
     for row in rows {
-        let current_path = path_store.get(assigned_state.path_id(row));
+        let old_path_id = assigned_state.path_id(row);
+        let current_path = path_store.get(old_path_id);
         if !row_requires_reassignment(current_path, edge) {
             continue;
         }
 
-        let path_index =
-            paths::assign_row_to_path_id(labels.row(row), feasible_path_ids, path_store);
-        assigned_state.assign_row(row, feasible_path_ids[path_index]);
+        let new_path_id = feasible_path_ids
+            [paths::assign_row_to_path_id(labels.row(row), feasible_path_ids, path_store)];
+        if old_path_id != new_path_id {
+            changed_rows += 1;
+        }
+        assigned_state.assign_row(row, new_path_id);
     }
+    changed_rows
 }
 
 fn reassign_affected_samples(
@@ -820,7 +1046,7 @@ fn reassign_affected_samples(
     path_store: &paths::PathStore,
     labels: &LabelMatrix,
     assigned_state: &mut AssignedPathState,
-) {
+) -> usize {
     reassign_rows(
         affected_rows.iter().copied(),
         edge,
@@ -828,7 +1054,7 @@ fn reassign_affected_samples(
         path_store,
         labels,
         assigned_state,
-    );
+    )
 }
 
 fn has_effective_weighting(sample_weights: &[f64]) -> bool {
@@ -887,7 +1113,6 @@ mod tests {
         ReconcileOptions {
             augment_path,
             threads,
-            verbose: false,
         }
     }
 
@@ -1115,7 +1340,7 @@ mod tests {
             None,
         );
 
-        reassign_affected_samples(
+        let reassigned_rows = reassign_affected_samples(
             &candidate,
             prepared.rows_for_job(0),
             &pruned_ids,
@@ -1124,6 +1349,7 @@ mod tests {
             &mut state,
         );
 
+        assert_eq!(reassigned_rows, 1);
         assert_eq!(
             paths::materialize_paths(state.assigned_path_ids(), &store),
             vec![path(&[1, 1]), path(&[1, 1]), path(&[2, 2])]
@@ -1232,6 +1458,42 @@ mod tests {
             select_best_candidate(&parallel_prepared, &parallel_plan, &inputs, Some(&pool));
 
         assert_eq!(serial, parallel);
+    }
+
+    #[test]
+    fn select_best_candidate_selects_lowest_cost_candidate() {
+        let labels = labels_from_paths(&[
+            path(&[1, 1, 1, 1]),
+            path(&[2, 1, 2, 2]),
+            path(&[3, 3, 2, 3]),
+            path(&[4, 4, 4, 3]),
+        ]);
+        let state = ReconciliationState::new(&labels);
+        let round = state
+            .collect_round_candidates(None)
+            .expect("conflicting input should produce a reconciliation round");
+        let inputs = ScoringInputs {
+            assigned_state: &state.assigned_state,
+            path_store: &state.path_store,
+            labels: &labels,
+            sample_weights: &[1.0; 4],
+        };
+        let prepared = prepared_round(
+            &round.candidates,
+            &state.feasible_path_ids,
+            &state.assigned_state,
+            &state.path_store,
+            &labels,
+            None,
+        );
+        let mut expected = score_candidates(&prepared, &inputs);
+        expected.sort_by(compare_candidates);
+
+        let selected =
+            select_best_candidate(&prepared, &ThreadedScoringPlan::Serial, &inputs, None)
+                .expect("candidate selection should succeed");
+
+        assert_eq!(selected, expected[0]);
     }
 
     #[test]

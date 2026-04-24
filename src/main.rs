@@ -1,4 +1,5 @@
 mod cli;
+mod logging;
 
 use std::fs::File;
 use std::io::{self, IsTerminal, Read, Write};
@@ -16,11 +17,13 @@ fn main() {
         std::process::exit(0);
     }
 
+    if let Err(error) = logging::init(cli.runtime.verbose) {
+        eprintln!("Error: failed to initialize logging: {error}");
+        std::process::exit(1);
+    }
+
     if let Err(error) = run_cli(&cli) {
-        eprintln!("error: {error}");
-        for cause in error.chain().skip(1) {
-            eprintln!("caused by: {cause}");
-        }
+        tracing::error!("{error:#}");
         std::process::exit(1);
     }
 }
@@ -34,10 +37,10 @@ fn run_cli(cli: &Cli) -> anyhow::Result<()> {
     let input_reader: Box<dyn Read> = if cli.input == "-" {
         Box::new(io::stdin())
     } else {
-        Box::new(File::open(&cli.input).with_context(|| format!("unable to open {}", cli.input))?)
+        Box::new(File::open(&cli.input).with_context(|| format!("Unable to open {}", cli.input))?)
     };
     let input =
-        mrtree::io::read_tsv(input_reader, cli.header).context("failed to read input table")?;
+        mrtree::io::read_tsv(input_reader, cli.header).context("Failed to read input table")?;
     let result = mrtree::reconcile_input(
         input,
         &mrtree::RunOptions {
@@ -52,7 +55,6 @@ fn run_cli(cli: &Cli) -> anyhow::Result<()> {
             runtime: mrtree::RunRuntimeOptions {
                 seed: cli.runtime.seed,
                 threads: cli.runtime.threads,
-                verbose: cli.runtime.verbose,
             },
         },
     )?;
@@ -62,14 +64,11 @@ fn run_cli(cli: &Cli) -> anyhow::Result<()> {
     } else {
         Box::new(
             File::create(&cli.output)
-                .with_context(|| format!("unable to create {}", cli.output))?,
+                .with_context(|| format!("Unable to create {}", cli.output))?,
         )
     };
     mrtree::io::write_tsv(output_writer, cli.header, &result.effective, &result.paths)
-        .context("failed to write output")?;
-    mrtree::log_info_message(
-        cli.runtime.verbose,
-        format_args!("Finished writing output to {output_target}"),
-    );
+        .context("Failed to write output")?;
+    tracing::info!(output = %output_target, "Finished writing output");
     Ok(())
 }
