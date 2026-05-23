@@ -130,6 +130,9 @@ pub(crate) struct Candidate {
 }
 
 impl LabelMatrix {
+    /// # Panics
+    ///
+    /// Panics if `data.len()` does not equal `n_rows * n_cols`.
     #[must_use]
     pub fn new(n_rows: usize, n_cols: usize, data: Vec<RealLabel>) -> Self {
         assert_eq!(
@@ -178,6 +181,10 @@ impl LabelMatrix {
 }
 
 impl InputTable {
+    /// # Errors
+    ///
+    /// Returns an error if the sample IDs or cluster headers do not match the
+    /// dimensions of `labels`.
     pub fn new(
         sample_header: Option<String>,
         sample_ids: Vec<String>,
@@ -246,6 +253,10 @@ impl InputTable {
 }
 
 impl EffectiveTable {
+    /// # Errors
+    ///
+    /// Returns an error if the sample IDs, cluster headers, original-column
+    /// indices, or `K` metadata do not match the dimensions of `labels`.
     pub fn new(
         sample_header: Option<String>,
         sample_ids: Vec<String>,

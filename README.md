@@ -69,12 +69,13 @@ Each reconciliation round proceeds as follows:
    - Discard paths in which the same finer-resolution cluster appears under a different broader cluster.
    - Recombine the prefix above the inconsistency with a compatible deeper suffix from another path, preserving lower-level structure when possible.
 4. For each sample currently assigned to the finer-resolution cluster in that candidate, choose the remaining path with the smallest Hamming distance to the sample's original input labels.
-5. Score the candidate by summing, over those samples, the sample weight multiplied by the number of levels that would change between the sample's current assigned path and its chosen replacement path.
+5. Score the candidate by summing, over those samples, the sample weight multiplied by the per-level edit cost between the sample's current assigned path and its chosen replacement path. By default all levels have equal weight, so this reduces to the number of changed levels.
 6. Apply the candidate with the lowest total score, break ties deterministically, reassign only the rows whose current parent conflicts with the selected relation, and repeat until every finer-resolution cluster appears under exactly one broader cluster.
 
-Two parameters affect this procedure:
+Three parameters affect this procedure:
 
 - `--sample-weighting` computes one weight per sample before the greedy rounds begin, using the label matrix that enters reconciliation. If `--consensus` is enabled, that means the consensus-reduced matrix. Smaller clusters receive larger weights, making changes that disrupt those groups more expensive. For sample $i$, the weight is $w_i = \left(\sum_{\ell=1}^{L} \lvert C_{\ell}(i) \rvert\right)^{-0.5}$, where $\lvert C_{\ell}(i) \rvert$ is the size of the cluster containing $i$ at level $\ell$.
+- `--level-weights` assigns one positive finite weight per clustering level in the original TSV column order, excluding the sample ID column. These weights affect candidate edit cost during reconciliation in the following manner: $w_i \times \sum_{\ell=1}^{L} \alpha_\ell \mathbf{1}[\text{level } \ell \text{ changes}]$, where $w_i$ is the sample weight and $\alpha_\ell$ is the user-supplied level weight. Per-level weights also influence same-K consensus construction when `--consensus` is enabled.
 - `--augment-path` introduces placeholder labels written as `-1` when this preserves structure that would otherwise be forced into a less informative hierarchy. `-1` represents a synthetic intermediate assignment, not a real input cluster label.
 
 ## Installation
@@ -110,11 +111,12 @@ mrtree-rs [OPTIONS] [INPUT] [OUTPUT]
 |-----------------|-------------|---------|
 | `INPUT` | Input TSV file | `-` (stdin) |
 | `OUTPUT` | Output TSV file | `-` (stdout) |
-| `--header` | Treat the first row as a header and emit a header row on output | off |
+| `--header` | Treat the first row as a header and emit a header row on output | Off |
 | `--max-k <N>` | Keep only clustering columns where the number of clusters (`K`) is ≤ `N` | no limit |
-| `--consensus` | Combine repeated clustering levels with the same `K` (same number of clusters) | off |
-| `--sample-weighting` | Give more weight to samples from smaller clusters | off |
-| `--augment-path` | Enable synthetic path augmentation | off |
+| `--consensus` | Combine repeated clustering levels with the same `K` (same number of clusters) | Off |
+| `--sample-weighting` | Give more weight to samples from smaller clusters | Off |
+| `--level-weights <W1,W2,...>` | Use custom per-level weights for scoring and consensus | `1.0` per level |
+| `--augment-path` | Enable synthetic path augmentation | Off |
 | `--seed <N>` | Seed for deterministic consensus clustering | `0` |
 | `--threads <N>` | Number of worker threads; `0` uses all available threads | `1` |
 | `-v`, `--verbose` | Repeat to increase stderr logging verbosity (`-v` INFO, `-vv` DEBUG, `-vvv` TRACE) | ERROR and WARN |

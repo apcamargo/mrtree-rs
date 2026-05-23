@@ -62,6 +62,10 @@ impl PreparedInput {
     }
 }
 
+/// # Errors
+///
+/// Returns an error if preprocessing leaves fewer than two clustering levels
+/// or if the resulting effective table metadata is inconsistent.
 pub fn prepare(input: InputTable, options: &PrepareOptions) -> crate::Result<PreparedInput> {
     let (sample_header, sample_ids, cluster_headers, labels) = input.into_parts();
     let ks_by_column = (0..labels.n_cols())

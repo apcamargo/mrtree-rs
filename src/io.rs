@@ -5,6 +5,10 @@ use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use crate::error::MrtreeError;
 use crate::model::{EffectiveTable, InputTable, LabelMatrix, Path, PathLabel, RealLabel};
 
+/// # Errors
+///
+/// Returns an error if the TSV cannot be read, rows are ragged, labels are
+/// invalid, or the parsed table violates input invariants.
 pub fn read_tsv<R>(reader: R, header: bool) -> crate::Result<InputTable>
 where
     R: Read,
@@ -72,6 +76,10 @@ where
     )
 }
 
+/// # Errors
+///
+/// Returns an error if the output row count or path widths do not match the
+/// effective table, or if writing the TSV fails.
 pub fn write_tsv<W>(
     writer: W,
     include_header: bool,

@@ -50,6 +50,7 @@ fn run_cli(cli: &Cli) -> anyhow::Result<()> {
             },
             scoring: mrtree::RunScoringOptions {
                 sample_weighting: cli.scoring.sample_weighting,
+                level_weights: cli.scoring.level_weights.clone(),
                 augment_path: cli.scoring.augment_path,
             },
             runtime: mrtree::RunRuntimeOptions {

@@ -53,9 +53,18 @@ pub(crate) struct PreprocessArgs {
 
 #[derive(Debug, Clone, Args)]
 pub(crate) struct ScoringArgs {
-    /// Use inverse-cluster-size sample weights during scoring and consensus
+    /// Use inverse-cluster-size sample weights for scoring and consensus
     #[arg(long = "sample-weighting", help_heading = "Reconciliation")]
     pub(crate) sample_weighting: bool,
+
+    /// Use custom per-level weights for scoring and consensus
+    #[arg(
+        long = "level-weights",
+        value_delimiter = ',',
+        value_name = "W1,W2,...",
+        help_heading = "Reconciliation"
+    )]
+    pub(crate) level_weights: Option<Vec<f64>>,
 
     /// Enable synthetic path augmentation
     #[arg(long = "augment-path", help_heading = "Reconciliation")]

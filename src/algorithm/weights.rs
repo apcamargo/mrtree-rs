@@ -31,7 +31,9 @@ pub(crate) fn compute_sample_weights(labels: &LabelMatrix) -> Vec<f64> {
                 .enumerate()
                 .map(|(column, value)| layer_sizes[column][value])
                 .sum::<usize>();
-            1.0 / (total as f64).sqrt()
+            1.0 /
+                f64::from(u32::try_from(total).expect("sample-weight total should fit in u32"))
+                    .sqrt()
         })
         .collect::<Vec<_>>();
     if enabled!(Level::TRACE) {
@@ -71,7 +73,8 @@ fn summarize_weight_trace(
     let weight_mean = if weights.is_empty() {
         0.0
     } else {
-        weights.iter().sum::<f64>() / weights.len() as f64
+        weights.iter().sum::<f64>()
+            / f64::from(u32::try_from(weights.len()).expect("weight count should fit in u32"))
     };
 
     WeightTraceSummary {

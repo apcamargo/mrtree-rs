@@ -50,6 +50,7 @@ impl ConsensusState {
 pub(crate) fn reduce_same_k_groups(
     effective: &EffectiveTable,
     sample_weighting: bool,
+    level_weights: Option<&[f64]>,
     seed: u64,
 ) -> crate::Result<ConsensusState> {
     let mut reduced_columns = Vec::new();
@@ -78,8 +79,20 @@ pub(crate) fn reduce_same_k_groups(
             },
             seed = group_seed,
             sample_weighting,
+            level_weighting = level_weights.is_some(),
             "Consensus same-K group"
         );
+        if group_width > 1
+            && let Some(level_weights) = level_weights
+        {
+            trace!(
+                reduced_index,
+                source_start = group_start,
+                source_end = group_end,
+                level_weights_per_level = ?&level_weights[group_start..group_end],
+                "Consensus same-K group weights"
+            );
+        }
 
         for group in group_mapping.iter_mut().take(group_end).skip(group_start) {
             *group = reduced_index;
@@ -98,10 +111,12 @@ pub(crate) fn reduce_same_k_groups(
 
         let group_columns = (group_start..group_end).collect::<Vec<_>>();
         let group_labels = effective.labels().reordered_columns(&group_columns);
+        let group_level_weights = level_weights.map(|weights| &weights[group_start..group_end]);
         reduced_columns.push(consensus_column(
             &group_labels,
             k,
             sample_weighting,
+            group_level_weights,
             group_seed,
         )?);
         group_start = group_end;
@@ -121,6 +136,7 @@ fn consensus_column(
     labels: &LabelMatrix,
     k: usize,
     sample_weighting: bool,
+    level_weights: Option<&[f64]>,
     seed: u64,
 ) -> crate::Result<Vec<RealLabel>> {
     if k == 1 {
@@ -136,7 +152,7 @@ fn consensus_column(
         return Ok(assignments);
     }
 
-    let mut encoded = build_membership_matrix(labels, k);
+    let mut encoded = build_membership_matrix(labels, k, level_weights);
     if sample_weighting {
         let sample_weights = weights::compute_sample_weights(labels);
         for (row_idx, weight) in sample_weights.into_iter().enumerate() {
@@ -168,10 +184,15 @@ fn consensus_column(
     Ok(assignments)
 }
 
-fn build_membership_matrix(labels: &LabelMatrix, k: usize) -> Array2<f64> {
+fn build_membership_matrix(
+    labels: &LabelMatrix,
+    k: usize,
+    level_weights: Option<&[f64]>,
+) -> Array2<f64> {
     let mut matrix = Array2::<f64>::zeros((labels.n_rows(), labels.n_cols() * k));
 
     for column in 0..labels.n_cols() {
+        let column_scale = level_weights.map_or(1.0, |weights| weights[column].sqrt());
         let distinct = labels.column_iter(column).collect::<BTreeSet<_>>();
         let index_by_label = distinct
             .into_iter()
@@ -182,7 +203,7 @@ fn build_membership_matrix(labels: &LabelMatrix, k: usize) -> Array2<f64> {
         for row in 0..labels.n_rows() {
             let label = labels.row(row)[column];
             let offset = index_by_label[&label];
-            matrix[(row, column * k + offset)] = 1.0;
+            matrix[(row, column * k + offset)] = column_scale;
         }
     }
 
@@ -283,6 +304,7 @@ fn columns_to_matrix(columns: &[Vec<RealLabel>]) -> LabelMatrix {
 mod tests {
     use super::*;
     use crate::model::{EffectiveTable, LabelMatrix, PathLabel};
+    use float_cmp::assert_approx_eq;
 
     fn label(value: u64) -> RealLabel {
         RealLabel::new(value)
@@ -321,7 +343,7 @@ mod tests {
         )
         .expect("valid effective table");
 
-        let error = reduce_same_k_groups(&effective, false, 7)
+        let error = reduce_same_k_groups(&effective, false, None, 7)
             .expect_err("single reduced layer should be rejected");
         assert!(matches!(
             error,
@@ -361,8 +383,8 @@ mod tests {
         )
         .expect("valid effective table");
 
-        let first = reduce_same_k_groups(&effective, false, 11).unwrap();
-        let second = reduce_same_k_groups(&effective, false, 11).unwrap();
+        let first = reduce_same_k_groups(&effective, false, None, 11).unwrap();
+        let second = reduce_same_k_groups(&effective, false, None, 11).unwrap();
         assert_eq!(first.labels(), second.labels());
     }
 
@@ -404,8 +426,8 @@ mod tests {
         )
         .expect("valid effective table");
 
-        let state =
-            reduce_same_k_groups(&effective, false, 5).expect("consensus reduction should succeed");
+        let state = reduce_same_k_groups(&effective, false, None, 5)
+            .expect("consensus reduction should succeed");
         assert_eq!(state.labels().n_cols(), 2);
 
         let reduced_paths = (0..state.labels().n_rows())
@@ -453,5 +475,18 @@ mod tests {
                 PathLabel::Augmented,
             ]]
         );
+    }
+
+    #[test]
+    fn build_membership_matrix_uses_square_root_level_scaling() {
+        let labels = LabelMatrix::new(2, 2, vec![label(1), label(1), label(2), label(2)]);
+
+        let unweighted = build_membership_matrix(&labels, 2, None);
+        let weighted = build_membership_matrix(&labels, 2, Some(&[1.0, 4.0]));
+
+        assert_approx_eq!(f64, unweighted[(0, 0)], 1.0);
+        assert_approx_eq!(f64, weighted[(0, 0)], 1.0);
+        assert_approx_eq!(f64, unweighted[(0, 2)], 1.0);
+        assert_approx_eq!(f64, weighted[(0, 2)], 2.0);
     }
 }

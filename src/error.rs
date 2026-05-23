@@ -75,6 +75,15 @@ pub enum MrtreeError {
     #[error("Sample weight length mismatch: expected {expected}, got {actual}")]
     SampleWeightsLengthMismatch { expected: usize, actual: usize },
 
+    #[error("Level weight length mismatch: expected {expected} clustering levels, got {actual}")]
+    LevelWeightsLengthMismatch { expected: usize, actual: usize },
+
+    #[error(
+        "Invalid level weight at clustering level {}: {weight}; weights must be finite and greater than 0",
+        index + 1
+    )]
+    InvalidLevelWeight { index: usize, weight: f64 },
+
     #[error("Consensus k-means failed: {0}")]
     ConsensusKMeans(String),
 

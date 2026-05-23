@@ -12,6 +12,7 @@ use super::paths;
 use super::tree;
 use crate::error::MrtreeError;
 use crate::model::{Candidate, Edge, LabelMatrix, NodeId, Path, PathLabel, RealLabel};
+use crate::reconcile::LevelWeightMode;
 
 const MIN_LABEL_COMPARISONS_PER_TASK: usize = 16_384;
 const MAX_SCORING_DISTANCE_CACHE_BYTES: usize = 128 * 1024 * 1024;
@@ -169,6 +170,7 @@ struct ScoringInputs<'a> {
     path_store: &'a paths::PathStore,
     labels: &'a LabelMatrix,
     sample_weights: &'a [f64],
+    level_weight_mode: LevelWeightMode<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -416,7 +418,7 @@ impl ReconciliationState {
             return None;
         }
         let bad_edge_count = candidates.len();
-        let lowest_layers = two_shallowest_layers(&candidates);
+        let lowest_layers = two_coarsest_layers(&candidates);
         candidates.retain(|edge| lowest_layers.contains(&edge.start.layer));
 
         Some(RoundCandidates {
@@ -510,17 +512,20 @@ impl ReconciliationState {
 pub(crate) fn run(
     labels: &LabelMatrix,
     sample_weights: &[f64],
+    level_weight_mode: LevelWeightMode<'_>,
     options: crate::reconcile::ReconcileOptions,
 ) -> crate::Result<Vec<Path>> {
-    validate_reconciliation_inputs(labels, sample_weights)?;
+    validate_reconciliation_inputs(labels, sample_weights, level_weight_mode)?;
 
     let thread_count = resolve_thread_count(options.threads);
     let weighted = has_effective_weighting(sample_weights);
+    let level_weighted = matches!(level_weight_mode, LevelWeightMode::Weighted(_));
     let trace_enabled = enabled!(Level::TRACE);
     info!(
         rows = labels.n_rows(),
         levels = labels.n_cols(),
         weighted,
+        level_weighted,
         augment_path = options.augment_path,
         "Running reconciliation"
     );
@@ -562,6 +567,7 @@ pub(crate) fn run(
             path_store: &state.path_store,
             labels,
             sample_weights,
+            level_weight_mode,
         };
         let prepared_round = PreparedRound::new(
             &round.candidates,
@@ -615,6 +621,7 @@ pub(crate) fn run(
 fn validate_reconciliation_inputs(
     labels: &LabelMatrix,
     sample_weights: &[f64],
+    level_weight_mode: LevelWeightMode<'_>,
 ) -> crate::Result<()> {
     if labels.n_cols() < 2 {
         return Err(MrtreeError::InternalAlgorithmInvariantViolation(
@@ -629,10 +636,19 @@ fn validate_reconciliation_inputs(
         });
     }
 
+    if let LevelWeightMode::Weighted(level_weights) = level_weight_mode
+        && level_weights.len() != labels.n_cols()
+    {
+        return Err(MrtreeError::LevelWeightsLengthMismatch {
+            expected: labels.n_cols(),
+            actual: level_weights.len(),
+        });
+    }
+
     Ok(())
 }
 
-fn two_shallowest_layers(candidates: &[Edge]) -> Vec<usize> {
+fn two_coarsest_layers(candidates: &[Edge]) -> Vec<usize> {
     let mut layers = candidates
         .iter()
         .map(|edge| edge.start.layer)
@@ -849,6 +865,36 @@ fn select_best_candidate(
     inputs: &ScoringInputs<'_>,
     thread_pool: Option<&ThreadPool>,
 ) -> Option<Candidate> {
+    match inputs.level_weight_mode {
+        LevelWeightMode::Unweighted => select_best_candidate_impl(
+            prepared_round,
+            scoring_plan,
+            inputs,
+            thread_pool,
+            |current_path, new_path| f64::from(count_path_changes(current_path, new_path)),
+        ),
+        LevelWeightMode::Weighted(level_weights) => select_best_candidate_impl(
+            prepared_round,
+            scoring_plan,
+            inputs,
+            thread_pool,
+            |current_path, new_path| {
+                weighted_path_change_cost(current_path, new_path, level_weights)
+            },
+        ),
+    }
+}
+
+fn select_best_candidate_impl<G>(
+    prepared_round: &PreparedRound<'_>,
+    scoring_plan: &ThreadedScoringPlan,
+    inputs: &ScoringInputs<'_>,
+    thread_pool: Option<&ThreadPool>,
+    change_cost: G,
+) -> Option<Candidate>
+where
+    G: Fn(&[PathLabel], &[PathLabel]) -> f64 + Send + Sync + Copy,
+{
     match (scoring_plan, thread_pool) {
         (ThreadedScoringPlan::ParallelChunked { tasks }, Some(pool)) => {
             let partial_costs = pool.install(|| {
@@ -857,7 +903,7 @@ fn select_best_candidate(
                     .map(|task| {
                         (
                             task.job_index,
-                            candidate_chunk_cost(task, prepared_round, inputs),
+                            candidate_chunk_cost(task, prepared_round, inputs, change_cost),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -885,54 +931,74 @@ fn select_best_candidate(
             .enumerate()
             .map(|(order, job)| Candidate {
                 edge: job.edge.clone(),
-                cost: candidate_cost(job, prepared_round, inputs),
+                cost: candidate_cost(job, prepared_round, inputs, change_cost),
                 order,
             })
             .min_by(compare_candidates),
     }
 }
 
-fn count_path_changes(current_path: &[PathLabel], new_path: &[PathLabel]) -> usize {
+fn count_path_changes(current_path: &[PathLabel], new_path: &[PathLabel]) -> u32 {
+    u32::try_from(
+        current_path
+            .iter()
+            .zip(new_path.iter())
+            .filter(|(lhs, rhs)| lhs != rhs)
+            .count(),
+    )
+    .expect("path change count should fit in u32")
+}
+
+fn weighted_path_change_cost(
+    current_path: &[PathLabel],
+    new_path: &[PathLabel],
+    level_weights: &[f64],
+) -> f64 {
     current_path
         .iter()
         .zip(new_path.iter())
-        .filter(|(lhs, rhs)| lhs != rhs)
-        .count()
+        .zip(level_weights.iter())
+        .filter(|((lhs, rhs), _)| lhs != rhs)
+        .map(|(_, weight)| *weight)
+        .sum()
 }
 
-fn accumulate_candidate_cost<'a, I, F>(
+fn accumulate_candidate_cost<'a, I, F, G>(
     pruned_paths: &[paths::ScoringPathView<'a>],
     rows: I,
-    assigned_state: &AssignedPathState,
-    path_store: &paths::PathStore,
-    labels: &LabelMatrix,
-    sample_weights: &[f64],
+    inputs: &ScoringInputs<'_>,
     mut distance_for_row: F,
+    change_cost: G,
 ) -> f64
 where
     I: IntoIterator<Item = (usize, usize)>,
     F: FnMut(usize, &[RealLabel], &paths::ScoringPathView<'a>) -> usize,
+    G: Fn(&[PathLabel], &[PathLabel]) -> f64 + Copy,
 {
     let mut total_cost = 0.0;
 
     for (row_offset, row) in rows {
-        let current_path = path_store.get(assigned_state.path_id(row));
-        let row_labels = labels.row(row);
+        let current_path = inputs.path_store.get(inputs.assigned_state.path_id(row));
+        let row_labels = inputs.labels.row(row);
         let best_index = best_scoring_path_index(pruned_paths, |_, path| {
             distance_for_row(row_offset, row_labels, path)
         });
         let new_path = pruned_paths[best_index].as_slice();
-        total_cost += sample_weights[row] * count_path_changes(current_path, new_path) as f64;
+        total_cost += inputs.sample_weights[row] * change_cost(current_path, new_path);
     }
 
     total_cost
 }
 
-fn candidate_cost(
+fn candidate_cost<G>(
     job: &CandidateJob<'_>,
     prepared_round: &PreparedRound<'_>,
     inputs: &ScoringInputs<'_>,
-) -> f64 {
+    change_cost: G,
+) -> f64
+where
+    G: Fn(&[PathLabel], &[PathLabel]) -> f64 + Send + Sync + Copy,
+{
     let group = &prepared_round.child_groups[job.child_group_index];
     accumulate_job_cost(
         job,
@@ -941,14 +1007,19 @@ fn candidate_cost(
         group.rows.len(),
         prepared_round.feasible_path_count,
         inputs,
+        change_cost,
     )
 }
 
-fn candidate_chunk_cost(
+fn candidate_chunk_cost<G>(
     task: &CandidateChunkTask,
     prepared_round: &PreparedRound<'_>,
     inputs: &ScoringInputs<'_>,
-) -> f64 {
+    change_cost: G,
+) -> f64
+where
+    G: Fn(&[PathLabel], &[PathLabel]) -> f64 + Send + Sync + Copy,
+{
     let job = &prepared_round.jobs[task.job_index];
     let group = &prepared_round.child_groups[job.child_group_index];
     accumulate_job_cost(
@@ -958,17 +1029,22 @@ fn candidate_chunk_cost(
         task.row_end,
         prepared_round.feasible_path_count,
         inputs,
+        change_cost,
     )
 }
 
-fn accumulate_job_cost(
+fn accumulate_job_cost<G>(
     job: &CandidateJob<'_>,
     group: &ChildGroup,
     row_start: usize,
     row_end: usize,
     feasible_path_count: usize,
     inputs: &ScoringInputs<'_>,
-) -> f64 {
+    change_cost: G,
+) -> f64
+where
+    G: Fn(&[PathLabel], &[PathLabel]) -> f64 + Send + Sync + Copy,
+{
     let rows = group.rows[row_start..row_end]
         .iter()
         .copied()
@@ -979,10 +1055,7 @@ fn accumulate_job_cost(
         accumulate_candidate_cost(
             &job.pruned_paths,
             rows,
-            inputs.assigned_state,
-            inputs.path_store,
-            inputs.labels,
-            inputs.sample_weights,
+            inputs,
             |row_offset, row_labels, path| {
                 let cached_distances = &distance_table
                     [row_offset * feasible_path_count..(row_offset + 1) * feasible_path_count];
@@ -996,16 +1069,15 @@ fn accumulate_job_cost(
                     }
                 }
             },
+            change_cost,
         )
     } else {
         accumulate_candidate_cost(
             &job.pruned_paths,
             rows,
-            inputs.assigned_state,
-            inputs.path_store,
-            inputs.labels,
-            inputs.sample_weights,
+            inputs,
             |_, row_labels, path| paths::path_distance(row_labels, path.as_slice()),
+            change_cost,
         )
     }
 }
@@ -1068,7 +1140,7 @@ fn has_effective_weighting(sample_weights: &[f64]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reconcile::ReconcileOptions;
+    use crate::reconcile::{LevelWeightMode, ReconcileOptions};
 
     fn label(value: u64) -> RealLabel {
         RealLabel::new(value)
@@ -1172,7 +1244,18 @@ mod tests {
             .enumerate()
             .map(|(order, job)| Candidate {
                 edge: job.edge.clone(),
-                cost: candidate_cost(job, prepared_round, inputs),
+                cost: match inputs.level_weight_mode {
+                    LevelWeightMode::Unweighted => {
+                        candidate_cost(job, prepared_round, inputs, |current_path, new_path| {
+                            f64::from(count_path_changes(current_path, new_path))
+                        })
+                    }
+                    LevelWeightMode::Weighted(level_weights) => {
+                        candidate_cost(job, prepared_round, inputs, |current_path, new_path| {
+                            weighted_path_change_cost(current_path, new_path, level_weights)
+                        })
+                    }
+                },
                 order,
             })
             .collect()
@@ -1185,6 +1268,7 @@ mod tests {
         path_store: &paths::PathStore,
         labels: &LabelMatrix,
         sample_weights: &[f64],
+        level_weight_mode: LevelWeightMode<'_>,
     ) -> f64 {
         let pruned_paths = paths::prune_scoring_paths(feasible_path_ids, edge, path_store);
         let mut total_cost = 0.0;
@@ -1212,7 +1296,15 @@ mod tests {
             }
 
             let new_path = pruned_paths[best_index].as_slice();
-            total_cost += sample_weight * count_path_changes(current_path, new_path) as f64;
+            let path_change_cost = match level_weight_mode {
+                LevelWeightMode::Unweighted => {
+                    f64::from(count_path_changes(current_path, new_path))
+                }
+                LevelWeightMode::Weighted(level_weights) => {
+                    weighted_path_change_cost(current_path, new_path, level_weights)
+                }
+            };
+            total_cost += sample_weight * path_change_cost;
         }
 
         total_cost
@@ -1251,8 +1343,13 @@ mod tests {
     #[test]
     fn run_rejects_mismatched_sample_weights() {
         let labels = labels(&[&[1, 1], &[2, 2]]);
-        let error = run(&labels, &[1.0], options(false, 1))
-            .expect_err("mismatched sample weights should fail");
+        let error = run(
+            &labels,
+            &[1.0],
+            LevelWeightMode::Unweighted,
+            options(false, 1),
+        )
+        .expect_err("mismatched sample weights should fail");
 
         assert!(matches!(
             error,
@@ -1264,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_round_candidates_uses_bad_nodes_from_two_shallowest_layers() {
+    fn collect_round_candidates_uses_bad_nodes_from_two_coarsest_layers() {
         let labels = labels_from_paths(&[
             path(&[1, 1, 1, 1]),
             path(&[2, 1, 2, 2]),
@@ -1361,8 +1458,13 @@ mod tests {
         let labels = labels(&[&[1, 1, 1], &[1, 1, 2], &[2, 1, 3], &[2, 2, 4]]);
         let weights = vec![1.0; labels.n_rows()];
 
-        let reconciled = run(&labels, &weights, options(false, 1))
-            .expect("reconciliation should succeed on conflicting labels");
+        let reconciled = run(
+            &labels,
+            &weights,
+            LevelWeightMode::Unweighted,
+            options(false, 1),
+        )
+        .expect("reconciliation should succeed on conflicting labels");
 
         assert_reconciled_output(&reconciled, labels.n_rows(), labels.n_cols());
     }
@@ -1373,10 +1475,20 @@ mod tests {
         let labels = labels_from_paths(&input_paths);
         let weights = vec![1.0; labels.n_rows()];
 
-        let single_threaded =
-            run(&labels, &weights, options(false, 1)).expect("single-threaded run should work");
-        let multi_threaded =
-            run(&labels, &weights, options(false, 2)).expect("multi-threaded run should work");
+        let single_threaded = run(
+            &labels,
+            &weights,
+            LevelWeightMode::Unweighted,
+            options(false, 1),
+        )
+        .expect("single-threaded run should work");
+        let multi_threaded = run(
+            &labels,
+            &weights,
+            LevelWeightMode::Unweighted,
+            options(false, 2),
+        )
+        .expect("multi-threaded run should work");
 
         assert_eq!(multi_threaded, single_threaded);
         assert_reconciled_output(&multi_threaded, labels.n_rows(), labels.n_cols());
@@ -1387,8 +1499,13 @@ mod tests {
         let labels = labels(&[&[1, 1, 1], &[1, 2, 1], &[2, 1, 2]]);
         let weights = vec![1.0; labels.n_rows()];
 
-        let reconciled = run(&labels, &weights, options(true, 1))
-            .expect("augment-path reconciliation should succeed");
+        let reconciled = run(
+            &labels,
+            &weights,
+            LevelWeightMode::Unweighted,
+            options(true, 1),
+        )
+        .expect("augment-path reconciliation should succeed");
 
         assert_eq!(
             reconciled,
@@ -1426,6 +1543,7 @@ mod tests {
             path_store: &store,
             labels: &labels,
             sample_weights: &weights,
+            level_weight_mode: LevelWeightMode::Unweighted,
         };
         let serial_prepared =
             prepared_round(&candidates, &feasible_ids, &state, &store, &labels, None);
@@ -1477,6 +1595,7 @@ mod tests {
             path_store: &state.path_store,
             labels: &labels,
             sample_weights: &[1.0; 4],
+            level_weight_mode: LevelWeightMode::Unweighted,
         };
         let prepared = prepared_round(
             &round.candidates,
@@ -1529,6 +1648,7 @@ mod tests {
             path_store: &store,
             labels: &labels,
             sample_weights: &weights,
+            level_weight_mode: LevelWeightMode::Unweighted,
         };
         let serial_scores = score_candidates(&serial_prepared, &inputs);
         let parallel_scores = score_candidates(&parallel_prepared, &inputs);
@@ -1605,6 +1725,7 @@ mod tests {
             path_store: &store,
             labels: &labels,
             sample_weights: &weights,
+            level_weight_mode: LevelWeightMode::Unweighted,
         };
         let expected = brute_force_candidate_cost(
             &candidate,
@@ -1613,17 +1734,40 @@ mod tests {
             &store,
             &labels,
             &weights,
+            LevelWeightMode::Unweighted,
         );
 
         assert_approx_eq!(
             f64,
-            candidate_cost(&cached_prepared.jobs[0], &cached_prepared, &inputs),
+            candidate_cost(
+                &cached_prepared.jobs[0],
+                &cached_prepared,
+                &inputs,
+                |current_path, new_path| f64::from(count_path_changes(current_path, new_path)),
+            ),
             expected
         );
         assert_approx_eq!(
             f64,
-            candidate_cost(&uncached_prepared.jobs[0], &uncached_prepared, &inputs),
+            candidate_cost(
+                &uncached_prepared.jobs[0],
+                &uncached_prepared,
+                &inputs,
+                |current_path, new_path| f64::from(count_path_changes(current_path, new_path)),
+            ),
             expected
+        );
+    }
+
+    #[test]
+    fn weighted_path_change_cost_counts_augmented_levels_normally() {
+        let current_path = vec![real(1), PathLabel::Augmented, real(3)];
+        let new_path = vec![real(2), real(2), real(3)];
+
+        assert_approx_eq!(
+            f64,
+            weighted_path_change_cost(&current_path, &new_path, &[2.0, 5.0, 7.0]),
+            7.0
         );
     }
 
@@ -1704,6 +1848,7 @@ mod tests {
             path_store: &store,
             labels: &labels,
             sample_weights: &weights,
+            level_weight_mode: LevelWeightMode::Unweighted,
         };
         let serial_prepared =
             prepared_round(&candidates, &feasible_ids, &state, &store, &labels, None);
