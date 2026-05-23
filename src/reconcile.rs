@@ -1,6 +1,6 @@
 use crate::error::MrtreeError;
 use crate::model::{LabelMatrix, Path};
-use crate::weights::{validate_level_weights, SampleWeights};
+use crate::weights::{SampleWeights, validate_level_weights};
 use float_cmp::approx_eq;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -114,9 +114,11 @@ mod tests {
             .expect("uniform level-weighted reconciliation should succeed");
 
         assert_eq!(unweighted, weighted);
-        assert!(weighted
-            .iter()
-            .all(|path| { path.iter().all(|label| matches!(label, PathLabel::Real(_))) }));
+        assert!(
+            weighted
+                .iter()
+                .all(|path| { path.iter().all(|label| matches!(label, PathLabel::Real(_))) })
+        );
     }
 
     #[test]

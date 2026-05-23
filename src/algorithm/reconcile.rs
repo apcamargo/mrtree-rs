@@ -518,13 +518,13 @@ pub(crate) fn run(
     validate_reconciliation_inputs(labels, sample_weights, level_weight_mode)?;
 
     let thread_count = resolve_thread_count(options.threads);
-    let weighted = has_effective_weighting(sample_weights);
+    let sample_weighted = has_effective_weighting(sample_weights);
     let level_weighted = matches!(level_weight_mode, LevelWeightMode::Weighted(_));
     let trace_enabled = enabled!(Level::TRACE);
     info!(
         rows = labels.n_rows(),
         levels = labels.n_cols(),
-        weighted,
+        sample_weighted,
         level_weighted,
         augment_path = options.augment_path,
         "Running reconciliation"
