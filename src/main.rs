@@ -70,6 +70,6 @@ fn run_cli(cli: &Cli) -> anyhow::Result<()> {
     };
     mrtree::io::write_tsv(output_writer, cli.header, &result.effective, &result.paths)
         .context("Failed to write output")?;
-    tracing::info!(output = %output_target, "Finished writing output");
+    tracing::info!("Finished writing '{}'", output_target);
     Ok(())
 }

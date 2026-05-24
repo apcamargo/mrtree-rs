@@ -546,12 +546,16 @@ pub(crate) fn run(
     } else {
         None
     };
+
     let mut round_number = 0_usize;
 
     loop {
         let Some(round) = state.collect_round_candidates(thread_pool.as_ref()) else {
             return Ok(state.materialize_output());
         };
+        if round_number == 0 {
+            info!("Initial number of bad edges: {}", round.bad_edge_count);
+        }
         round_number += 1;
         if trace_enabled {
             trace_round_frontier(round_number, &round);

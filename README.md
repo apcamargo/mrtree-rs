@@ -4,7 +4,7 @@
 
 ## Background
 
-Multiresolution clustering results often do not form a clean hierarchy. In a hierarchical clustering, each finer-resolution cluster is fully nested within a single broader cluster at the next coarser level. When that does not happen, a group at a finer level can end up split across multiple groups at the level above it, making the overall structure harder to interpret.
+Multiresolution clustering results often do not form a clean hierarchy. In a hierarchical clustering, each finer-resolution cluster is fully nested within a single broader cluster at the next coarser level. When that does not happen, a group at a finer level can end up split across multiple groups at the level above it.
 
 Consider this input label matrix:
 
