@@ -98,10 +98,6 @@ pub fn reconcile_input(input: InputTable, options: &RunOptions) -> Result<RunRes
         warn!("{reorder_warning}");
     }
 
-    if options.scoring.sample_weighting {
-        info!("Using inverse-cluster-size sample weighting");
-    }
-
     let consensus_state = if options.preprocess.consensus {
         info!(
             seed = options.runtime.seed,
