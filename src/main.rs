@@ -28,6 +28,18 @@ fn main() {
     }
 }
 
+fn read_freeze_samples(path: &str) -> anyhow::Result<Vec<String>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Unable to read freeze samples file: {path}"))?;
+    let sample_ids: Vec<String> = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    Ok(sample_ids)
+}
+
 fn run_cli(cli: &Cli) -> anyhow::Result<()> {
     let output_target = if cli.output == "-" {
         "stdout"
@@ -41,6 +53,13 @@ fn run_cli(cli: &Cli) -> anyhow::Result<()> {
     };
     let input =
         mrtree::io::read_tsv(input_reader, cli.header).context("Failed to read input table")?;
+
+    let frozen_sample_ids = if let Some(freeze_path) = &cli.constraint.freeze_samples {
+        read_freeze_samples(freeze_path)?
+    } else {
+        Vec::new()
+    };
+
     let result = mrtree::reconcile_input(
         input,
         &mrtree::RunOptions {
@@ -57,6 +76,7 @@ fn run_cli(cli: &Cli) -> anyhow::Result<()> {
                 seed: cli.runtime.seed,
                 threads: cli.runtime.threads,
             },
+            constraint: mrtree::RunConstraintOptions { frozen_sample_ids },
         },
     )?;
 

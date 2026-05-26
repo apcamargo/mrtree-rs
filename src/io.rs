@@ -53,8 +53,9 @@ where
             return Err(MrtreeError::InputHasTooFewColumns);
         }
 
+        let sample_id = record.get(0).unwrap_or_default().to_owned();
         let row_labels = parse_cluster_row(&record, line_number, header)?;
-        sample_ids.push(record.get(0).unwrap_or_default().to_owned());
+        sample_ids.push(sample_id);
         labels.extend(row_labels);
     }
 
@@ -366,5 +367,13 @@ mod tests {
         );
         assert_eq!(reparsed.sample_ids(), ["sample_a", "sample_b"]);
         assert_eq!(reparsed.labels().n_cols(), 2);
+    }
+
+    #[test]
+    fn read_tsv_rejects_duplicate_sample_ids() {
+        let data = b"sample\tk1\tk2\nfoo\t1\t2\nbar\t1\t2\nfoo\t2\t1\n";
+        let error = read_tsv(&data[..], true).expect_err("duplicate sample IDs should be rejected");
+
+        assert!(matches!(error, MrtreeError::DuplicateSampleIds));
     }
 }

@@ -20,13 +20,16 @@ pub(crate) enum LevelWeightMode<'a> {
 /// Returns an error if sample weights do not match the input row count, if
 /// level weights do not match the current input column count, if any level
 /// weight is non-finite or not greater than 0, or if reconciliation fails
-/// internally.
+/// internally. On success, returns the reconciled paths and the number of
+/// bad edges that remain in the output (zero for a fully reconciled result,
+/// non-zero when frozen-row constraints made full reconciliation impossible).
 pub fn reconcile_labels(
     labels: &LabelMatrix,
     weights: Option<&SampleWeights>,
     level_weights: Option<&[f64]>,
     options: &ReconcileOptions,
-) -> crate::Result<Vec<Path>> {
+    frozen_row_indices: &[usize],
+) -> crate::Result<(Vec<Path>, usize)> {
     let uniform_weights;
     let weight_slice = if let Some(weights) = weights {
         if weights.len() != labels.n_rows() {
@@ -52,7 +55,23 @@ pub fn reconcile_labels(
         LevelWeightMode::Unweighted
     };
 
-    crate::algorithm::reconcile::run(labels, weight_slice, level_weight_mode, *options)
+    for &row in frozen_row_indices {
+        if row >= labels.n_rows() {
+            return Err(MrtreeError::InternalAlgorithmInvariantViolation(format!(
+                "frozen row index {row} is out of bounds for label matrix with {} rows",
+                labels.n_rows()
+            )));
+        }
+    }
+
+    let output = crate::algorithm::reconcile::run(
+        labels,
+        weight_slice,
+        level_weight_mode,
+        *options,
+        frozen_row_indices,
+    )?;
+    Ok((output.paths, output.remaining_bad_edges))
 }
 
 fn has_effective_level_weighting(level_weights: &[f64]) -> bool {
@@ -92,7 +111,7 @@ mod tests {
     #[test]
     fn reconcile_rejects_mismatched_level_weight_lengths() {
         let labels = labels(&[&[1, 1], &[2, 2]]);
-        let error = reconcile_labels(&labels, None, Some(&[1.0]), &options())
+        let error = reconcile_labels(&labels, None, Some(&[1.0]), &options(), &[])
             .expect_err("mismatched level weights should fail");
 
         assert!(matches!(
@@ -108,14 +127,15 @@ mod tests {
     fn reconcile_treats_uniform_non_one_level_weights_like_unweighted() {
         let labels = labels(&[&[1, 1, 1], &[1, 1, 2], &[2, 1, 3], &[2, 2, 4]]);
 
-        let unweighted = reconcile_labels(&labels, None, None, &options())
+        let (unweighted_paths, _) = reconcile_labels(&labels, None, None, &options(), &[])
             .expect("unweighted reconciliation should succeed");
-        let weighted = reconcile_labels(&labels, None, Some(&[2.0, 2.0, 2.0]), &options())
-            .expect("uniform level-weighted reconciliation should succeed");
+        let (weighted_paths, _) =
+            reconcile_labels(&labels, None, Some(&[2.0, 2.0, 2.0]), &options(), &[])
+                .expect("uniform level-weighted reconciliation should succeed");
 
-        assert_eq!(unweighted, weighted);
+        assert_eq!(unweighted_paths, weighted_paths);
         assert!(
-            weighted
+            weighted_paths
                 .iter()
                 .all(|path| { path.iter().all(|label| matches!(label, PathLabel::Real(_))) })
         );
@@ -127,7 +147,7 @@ mod tests {
 
         for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let weights = [1.0, invalid, 1.0];
-            let error = reconcile_labels(&labels, None, Some(&weights), &options())
+            let error = reconcile_labels(&labels, None, Some(&weights), &options(), &[])
                 .expect_err("invalid level weights should fail");
 
             assert!(matches!(

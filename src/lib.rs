@@ -13,6 +13,7 @@ use tracing::{Level, debug, enabled, info, warn};
 pub use crate::error::MrtreeError as Error;
 
 use crate::model::{InputTable, Path};
+use std::collections::{BTreeSet, HashMap};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -35,11 +36,17 @@ pub struct RunRuntimeOptions {
     pub threads: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunConstraintOptions {
+    pub frozen_sample_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RunOptions {
     pub preprocess: RunPreprocessOptions,
     pub scoring: RunScoringOptions,
     pub runtime: RunRuntimeOptions,
+    pub constraint: RunConstraintOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +54,15 @@ pub struct RunResult {
     pub effective: crate::model::EffectiveTable,
     pub paths: Vec<Path>,
     pub reorder_warning: Option<preprocess::ReorderWarning>,
+    /// Non-zero when frozen-sample constraints prevented full reconciliation.
+    pub remaining_bad_edges: usize,
+}
+
+impl RunResult {
+    #[must_use]
+    pub fn is_fully_reconciled(&self) -> bool {
+        self.remaining_bad_edges == 0
+    }
 }
 
 /// # Errors
@@ -75,14 +91,49 @@ pub fn reconcile_input(input: InputTable, options: &RunOptions) -> Result<RunRes
                 .normalize_by_max()
         });
 
+    let frozen_row_indices = if options.constraint.frozen_sample_ids.is_empty() {
+        Vec::new()
+    } else {
+        if options.preprocess.consensus {
+            return Err(Error::FrozenSamplesWithConsensus);
+        }
+
+        let sample_id_to_row: HashMap<&str, usize> = prepared
+            .effective()
+            .sample_ids()
+            .iter()
+            .enumerate()
+            .map(|(idx, id)| (id.as_str(), idx))
+            .collect();
+
+        let mut resolved = BTreeSet::new();
+        for sample_id in &options.constraint.frozen_sample_ids {
+            let row = sample_id_to_row.get(sample_id.as_str()).ok_or_else(|| {
+                Error::FrozenSampleIdNotFound {
+                    sample_id: sample_id.clone(),
+                }
+            })?;
+            resolved.insert(*row);
+        }
+
+        let frozen_indices: Vec<usize> = resolved.into_iter().collect();
+        info!(
+            frozen_rows = frozen_indices.len(),
+            "Resolved frozen sample IDs to row indices"
+        );
+        frozen_indices
+    };
+
     if enabled!(Level::INFO) {
         let input_clusters = summary::clusters_per_level(prepared.effective().labels());
+        let frozen_count = frozen_row_indices.len();
         if let Some(level_weights) = effective_level_weights.as_ref() {
             info!(
                 rows = prepared.effective().labels().n_rows(),
                 levels = prepared.effective().labels().n_cols(),
                 clusters_per_level = ?input_clusters,
                 level_weights_per_level = ?level_weights.as_slice(),
+                frozen_rows = frozen_count,
                 "Prepared input"
             );
         } else {
@@ -90,6 +141,7 @@ pub fn reconcile_input(input: InputTable, options: &RunOptions) -> Result<RunRes
                 rows = prepared.effective().labels().n_rows(),
                 levels = prepared.effective().labels().n_cols(),
                 clusters_per_level = ?input_clusters,
+                frozen_rows = frozen_count,
                 "Prepared input"
             );
         }
@@ -161,7 +213,7 @@ pub fn reconcile_input(input: InputTable, options: &RunOptions) -> Result<RunRes
         },
     );
 
-    let reconciled = reconcile::reconcile_labels(
+    let (reconciled, remaining_bad_edges) = reconcile::reconcile_labels(
         reconcile_input,
         sample_weights.as_ref(),
         reconcile_level_weights,
@@ -169,6 +221,7 @@ pub fn reconcile_input(input: InputTable, options: &RunOptions) -> Result<RunRes
             augment_path: options.scoring.augment_path,
             threads: options.runtime.threads,
         },
+        &frozen_row_indices,
     )?;
 
     let output_paths = if let Some((state, _)) = consensus_state.as_ref() {
@@ -178,13 +231,24 @@ pub fn reconcile_input(input: InputTable, options: &RunOptions) -> Result<RunRes
     };
     if enabled!(Level::INFO) {
         let output_summary = summary::summarize_output(prepared.effective(), &output_paths)?;
-        info!(
-            levels = output_summary.clusters_per_level.len(),
-            clusters_per_level = ?output_summary.clusters_per_level,
-            reassignments_per_level = ?output_summary.reassignments_per_level,
-            rows_reassigned = output_summary.rows_reassigned,
-            "Finished reconciliation"
-        );
+        if remaining_bad_edges > 0 {
+            warn!(
+                remaining_bad_edges,
+                levels = output_summary.clusters_per_level.len(),
+                clusters_per_level = ?output_summary.clusters_per_level,
+                reassignments_per_level = ?output_summary.reassignments_per_level,
+                rows_reassigned = output_summary.rows_reassigned,
+                "Reconciliation finished with unresolved bad edges (frozen row constraints prevented full resolution)",
+            );
+        } else {
+            info!(
+                levels = output_summary.clusters_per_level.len(),
+                clusters_per_level = ?output_summary.clusters_per_level,
+                reassignments_per_level = ?output_summary.reassignments_per_level,
+                rows_reassigned = output_summary.rows_reassigned,
+                "Finished reconciliation",
+            );
+        }
     }
     let (effective, reorder_warning) = prepared.into_effective_and_warning();
 
@@ -192,5 +256,6 @@ pub fn reconcile_input(input: InputTable, options: &RunOptions) -> Result<RunRes
         effective,
         paths: output_paths,
         reorder_warning,
+        remaining_bad_edges,
     })
 }

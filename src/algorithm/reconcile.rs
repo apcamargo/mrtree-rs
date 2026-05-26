@@ -106,6 +106,34 @@ impl AssignedPathState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct FrozenRows {
+    mask: Vec<bool>,
+    count: usize,
+}
+
+impl FrozenRows {
+    fn new(frozen_row_indices: &[usize], n_rows: usize) -> Self {
+        let mut mask = vec![false; n_rows];
+        let mut count = 0;
+        for &row in frozen_row_indices {
+            if row < n_rows && !mask[row] {
+                mask[row] = true;
+                count += 1;
+            }
+        }
+        Self { mask, count }
+    }
+
+    fn contains(&self, row: usize) -> bool {
+        self.mask.get(row).copied().unwrap_or(false)
+    }
+
+    fn count(&self) -> usize {
+        self.count
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct ChildGroup {
     rows: Vec<usize>,
@@ -158,6 +186,12 @@ struct AugmentationSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReconcileRunOutput {
+    pub paths: Vec<Path>,
+    pub remaining_bad_edges: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ApplyOutcome {
     prune_summary: Option<paths::PruneSummary>,
     reassigned_rows: usize,
@@ -171,6 +205,7 @@ struct ScoringInputs<'a> {
     labels: &'a LabelMatrix,
     sample_weights: &'a [f64],
     level_weight_mode: LevelWeightMode<'a>,
+    frozen_rows: &'a FrozenRows,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +283,24 @@ impl<'a> PreparedRound<'a> {
         };
         prepared.maybe_build_distance_tables(feasible_path_ids, path_store, labels, thread_pool);
         prepared
+    }
+
+    fn filter_actionable_jobs(
+        &mut self,
+        assigned_state: &AssignedPathState,
+        path_store: &paths::PathStore,
+        frozen_rows: &FrozenRows,
+    ) {
+        self.jobs.retain(|job| {
+            let group = &self.child_groups[job.child_group_index];
+            group.rows.iter().any(|&row| {
+                !frozen_rows.contains(row)
+                    && row_requires_reassignment(
+                        path_store.get(assigned_state.path_id(row)),
+                        &job.edge,
+                    )
+            })
+        });
     }
 
     fn maybe_build_distance_tables(
@@ -405,6 +458,7 @@ impl ReconciliationState {
     fn collect_round_candidates(
         &self,
         thread_pool: Option<&ThreadPool>,
+        frozen_rows: &FrozenRows,
     ) -> Option<RoundCandidates> {
         let active_path_ids = self
             .assigned_state
@@ -418,7 +472,22 @@ impl ReconciliationState {
             return None;
         }
         let bad_edge_count = candidates.len();
-        let lowest_layers = two_coarsest_layers(&candidates);
+
+        let lowest_layers = select_actionable_layers(
+            &candidates,
+            &self.assigned_state,
+            &self.path_store,
+            frozen_rows,
+        );
+
+        if lowest_layers.is_empty() {
+            info!(
+                frozen_rows = frozen_rows.count(),
+                remaining_bad_edges = bad_edge_count,
+                "Reconciliation stalled: no actionable layers with the current frozen row constraints",
+            );
+            return None;
+        }
         candidates.retain(|edge| lowest_layers.contains(&edge.start.layer));
 
         Some(RoundCandidates {
@@ -467,6 +536,7 @@ impl ReconciliationState {
         labels: &LabelMatrix,
         augment_path: bool,
         lowest_layers: &[usize],
+        frozen_rows: &FrozenRows,
     ) -> ApplyOutcome {
         let prune_summary = enabled!(Level::TRACE)
             .then(|| paths::summarize_pruned_paths(&self.feasible_path_ids, edge, &self.path_store))
@@ -481,6 +551,7 @@ impl ReconciliationState {
             &self.path_store,
             labels,
             &mut self.assigned_state,
+            frozen_rows,
         );
 
         if augment_path {
@@ -509,12 +580,14 @@ impl ReconciliationState {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run(
     labels: &LabelMatrix,
     sample_weights: &[f64],
     level_weight_mode: LevelWeightMode<'_>,
     options: crate::reconcile::ReconcileOptions,
-) -> crate::Result<Vec<Path>> {
+    frozen_row_indices: &[usize],
+) -> crate::Result<ReconcileRunOutput> {
     validate_reconciliation_inputs(labels, sample_weights, level_weight_mode)?;
 
     let thread_count = resolve_thread_count(options.threads);
@@ -527,6 +600,7 @@ pub(crate) fn run(
         sample_weighted,
         level_weighted,
         augment_path = options.augment_path,
+        frozen_rows = frozen_row_indices.len(),
         "Running reconciliation"
     );
     debug!(
@@ -536,6 +610,7 @@ pub(crate) fn run(
     );
 
     let mut state = ReconciliationState::new(labels);
+    let frozen_rows = FrozenRows::new(frozen_row_indices, labels.n_rows());
     let thread_pool = if thread_count > 1 {
         Some(
             rayon::ThreadPoolBuilder::new()
@@ -550,8 +625,20 @@ pub(crate) fn run(
     let mut round_number = 0_usize;
 
     loop {
-        let Some(round) = state.collect_round_candidates(thread_pool.as_ref()) else {
-            return Ok(state.materialize_output());
+        let Some(round) = state.collect_round_candidates(thread_pool.as_ref(), &frozen_rows) else {
+            let paths = state.materialize_output();
+            let active_path_ids: Vec<_> =
+                state.assigned_state.rows_by_path.keys().copied().collect();
+            let remaining_bad_edges = tree::collect_bad_edges_from_ids(
+                &state.path_store,
+                &active_path_ids,
+                thread_pool.as_ref(),
+            )
+            .len();
+            return Ok(ReconcileRunOutput {
+                paths,
+                remaining_bad_edges,
+            });
         };
         if round_number == 0 {
             info!("Initial number of bad edges: {}", round.bad_edge_count);
@@ -572,8 +659,9 @@ pub(crate) fn run(
             labels,
             sample_weights,
             level_weight_mode,
+            frozen_rows: &frozen_rows,
         };
-        let prepared_round = PreparedRound::new(
+        let mut prepared_round = PreparedRound::new(
             &round.candidates,
             &state.feasible_path_ids,
             &state.assigned_state,
@@ -581,6 +669,24 @@ pub(crate) fn run(
             labels,
             thread_pool.as_ref(),
         );
+        prepared_round.filter_actionable_jobs(
+            &state.assigned_state,
+            &state.path_store,
+            &frozen_rows,
+        );
+        if prepared_round.jobs.is_empty() {
+            info!(
+                frozen_rows = frozen_rows.count(),
+                remaining_bad_edges = round.bad_edge_count,
+                "Reconciliation stalled: cannot resolve {} bad edge(s) with the current frozen row constraints",
+                round.bad_edge_count,
+            );
+            let paths = state.materialize_output();
+            return Ok(ReconcileRunOutput {
+                paths,
+                remaining_bad_edges: round.bad_edge_count,
+            });
+        }
         let scoring_plan = thread_pool
             .as_ref()
             .map_or(ThreadedScoringPlan::Serial, |pool| {
@@ -615,6 +721,7 @@ pub(crate) fn run(
             labels,
             options.augment_path,
             &round.lowest_layers,
+            &frozen_rows,
         );
         if trace_enabled {
             trace_apply_outcome(round_number, &selected, affected_rows.len(), &apply_outcome);
@@ -652,14 +759,42 @@ fn validate_reconciliation_inputs(
     Ok(())
 }
 
-fn two_coarsest_layers(candidates: &[Edge]) -> Vec<usize> {
-    let mut layers = candidates
+fn select_actionable_layers(
+    candidates: &[Edge],
+    assigned_state: &AssignedPathState,
+    path_store: &paths::PathStore,
+    frozen_rows: &FrozenRows,
+) -> Vec<usize> {
+    let layers: Vec<usize> = candidates
         .iter()
         .map(|edge| edge.start.layer)
-        .collect::<Vec<_>>();
-    layers.sort_unstable();
-    layers.dedup();
-    layers.into_iter().take(2).collect()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let mut actionable_layers = Vec::with_capacity(2);
+    for &layer in &layers {
+        if actionable_layers.len() >= 2 {
+            break;
+        }
+        let layer_has_actionable = candidates
+            .iter()
+            .filter(|edge| edge.start.layer == layer)
+            .any(|edge| {
+                (0..assigned_state.len()).any(|row| {
+                    if frozen_rows.contains(row) {
+                        return false;
+                    }
+                    let path = path_store.get(assigned_state.path_id(row));
+                    row_matches_candidate_child(path, edge)
+                })
+            });
+        if layer_has_actionable {
+            actionable_layers.push(layer);
+        }
+    }
+
+    actionable_layers
 }
 
 fn compare_candidates(left: &Candidate, right: &Candidate) -> Ordering {
@@ -1053,7 +1188,8 @@ where
         .iter()
         .copied()
         .enumerate()
-        .map(|(index, row)| (row_start + index, row));
+        .map(|(index, row)| (row_start + index, row))
+        .filter(|&(_, row)| !inputs.frozen_rows.contains(row));
 
     if let Some(distance_table) = group.distance_table.as_ref() {
         accumulate_candidate_cost(
@@ -1093,12 +1229,16 @@ fn reassign_rows<I>(
     path_store: &paths::PathStore,
     labels: &LabelMatrix,
     assigned_state: &mut AssignedPathState,
+    frozen_rows: &FrozenRows,
 ) -> usize
 where
     I: IntoIterator<Item = usize>,
 {
     let mut changed_rows = 0_usize;
     for row in rows {
+        if frozen_rows.contains(row) {
+            continue;
+        }
         let old_path_id = assigned_state.path_id(row);
         let current_path = path_store.get(old_path_id);
         if !row_requires_reassignment(current_path, edge) {
@@ -1122,6 +1262,7 @@ fn reassign_affected_samples(
     path_store: &paths::PathStore,
     labels: &LabelMatrix,
     assigned_state: &mut AssignedPathState,
+    frozen_rows: &FrozenRows,
 ) -> usize {
     reassign_rows(
         affected_rows.iter().copied(),
@@ -1130,6 +1271,7 @@ fn reassign_affected_samples(
         path_store,
         labels,
         assigned_state,
+        frozen_rows,
     )
 }
 
@@ -1320,6 +1462,7 @@ mod tests {
         path_store: &paths::PathStore,
         labels: &LabelMatrix,
         assigned_state: &mut AssignedPathState,
+        frozen_rows: &FrozenRows,
     ) {
         reassign_rows(
             0..assigned_state.len(),
@@ -1328,7 +1471,12 @@ mod tests {
             path_store,
             labels,
             assigned_state,
+            frozen_rows,
         );
+    }
+
+    fn no_frozen_rows(n_rows: usize) -> FrozenRows {
+        FrozenRows::new(&[], n_rows)
     }
 
     fn repeated_candidate_paths(rows_per_variant: usize, n_cols: usize) -> Vec<Path> {
@@ -1352,6 +1500,7 @@ mod tests {
             &[1.0],
             LevelWeightMode::Unweighted,
             options(false, 1),
+            &[],
         )
         .expect_err("mismatched sample weights should fail");
 
@@ -1373,9 +1522,10 @@ mod tests {
             path(&[4, 4, 4, 3]),
         ]);
         let state = ReconciliationState::new(&labels);
+        let fr = no_frozen_rows(labels.n_rows());
 
         let round = state
-            .collect_round_candidates(None)
+            .collect_round_candidates(None, &fr)
             .expect("conflicting input should produce a reconciliation round");
 
         assert_eq!(round.lowest_layers, vec![0, 1]);
@@ -1408,12 +1558,14 @@ mod tests {
         ];
         let duplicate_labels = labels_from_paths(&duplicate_paths);
         let unique_labels = labels_from_paths(&unique_paths);
+        let dup_fr = no_frozen_rows(duplicate_labels.n_rows());
+        let uniq_fr = no_frozen_rows(unique_labels.n_rows());
 
         let duplicate_round = ReconciliationState::new(&duplicate_labels)
-            .collect_round_candidates(None)
+            .collect_round_candidates(None, &dup_fr)
             .expect("duplicate-heavy conflicting input should produce a reconciliation round");
         let unique_round = ReconciliationState::new(&unique_labels)
-            .collect_round_candidates(None)
+            .collect_round_candidates(None, &uniq_fr)
             .expect("deduped conflicting input should produce a reconciliation round");
 
         assert_eq!(duplicate_round.lowest_layers, unique_round.lowest_layers);
@@ -1432,6 +1584,7 @@ mod tests {
             .map(|path| store.intern(path))
             .collect::<Vec<_>>();
         let candidate = edge(0, 1, 1, 1);
+        let fr = no_frozen_rows(assigned.len());
         let prepared = prepared_round(
             std::slice::from_ref(&candidate),
             state.assigned_path_ids(),
@@ -1448,6 +1601,7 @@ mod tests {
             &store,
             &labels,
             &mut state,
+            &fr,
         );
 
         assert_eq!(reassigned_rows, 1);
@@ -1462,15 +1616,17 @@ mod tests {
         let labels = labels(&[&[1, 1, 1], &[1, 1, 2], &[2, 1, 3], &[2, 2, 4]]);
         let weights = vec![1.0; labels.n_rows()];
 
-        let reconciled = run(
+        let output = run(
             &labels,
             &weights,
             LevelWeightMode::Unweighted,
             options(false, 1),
+            &[],
         )
         .expect("reconciliation should succeed on conflicting labels");
 
-        assert_reconciled_output(&reconciled, labels.n_rows(), labels.n_cols());
+        assert_eq!(output.remaining_bad_edges, 0);
+        assert_reconciled_output(&output.paths, labels.n_rows(), labels.n_cols());
     }
 
     #[test]
@@ -1484,6 +1640,7 @@ mod tests {
             &weights,
             LevelWeightMode::Unweighted,
             options(false, 1),
+            &[],
         )
         .expect("single-threaded run should work");
         let multi_threaded = run(
@@ -1491,11 +1648,116 @@ mod tests {
             &weights,
             LevelWeightMode::Unweighted,
             options(false, 2),
+            &[],
         )
         .expect("multi-threaded run should work");
 
-        assert_eq!(multi_threaded, single_threaded);
-        assert_reconciled_output(&multi_threaded, labels.n_rows(), labels.n_cols());
+        assert_eq!(multi_threaded.paths, single_threaded.paths);
+        assert_eq!(multi_threaded.remaining_bad_edges, 0);
+        assert_reconciled_output(&multi_threaded.paths, labels.n_rows(), labels.n_cols());
+    }
+
+    #[test]
+    fn run_stalls_with_remaining_bad_edges_when_all_conflicting_rows_are_frozen() {
+        let labels = labels(&[&[1, 1], &[2, 1]]);
+        let weights = vec![1.0; labels.n_rows()];
+
+        let output = run(
+            &labels,
+            &weights,
+            LevelWeightMode::Unweighted,
+            options(false, 1),
+            &[0, 1],
+        )
+        .expect("frozen-row stall should succeed");
+
+        assert_ne!(output.remaining_bad_edges, 0);
+        assert_eq!(output.paths, vec![path(&[1, 1]), path(&[2, 1])]);
+    }
+
+    #[test]
+    fn frozen_rows_affect_reconciliation_of_non_frozen_rows() {
+        let set_a = vec![path(&[1, 1, 1]), path(&[1, 2, 1])];
+        let set_b = vec![path(&[1, 2, 1]), path(&[2, 1, 2])];
+
+        let labels_a = labels_from_paths(&set_a);
+        let weights_a = vec![1.0; labels_a.n_rows()];
+        let a_only = run(
+            &labels_a,
+            &weights_a,
+            LevelWeightMode::Unweighted,
+            options(false, 1),
+            &[],
+        )
+        .expect("A-only reconciliation should succeed");
+
+        let mut labels_ab_rows = set_a.clone();
+        labels_ab_rows.extend(set_b.iter().cloned());
+        let labels_ab = labels_from_paths(&labels_ab_rows);
+        let weights_ab = vec![1.0; labels_ab.n_rows()];
+
+        let ab_unfrozen = run(
+            &labels_ab,
+            &weights_ab,
+            LevelWeightMode::Unweighted,
+            options(false, 1),
+            &[],
+        )
+        .expect("A+B reconciliation should succeed");
+
+        let ab_b_frozen = run(
+            &labels_ab,
+            &weights_ab,
+            LevelWeightMode::Unweighted,
+            options(false, 1),
+            &[2, 3],
+        )
+        .expect("A+B with B frozen reconciliation should succeed");
+
+        assert_eq!(a_only.remaining_bad_edges, 0);
+        assert_eq!(ab_unfrozen.remaining_bad_edges, 0);
+        assert_eq!(ab_b_frozen.remaining_bad_edges, 0);
+
+        assert_eq!(a_only.paths, vec![path(&[1, 1, 1]), path(&[1, 1, 1])]);
+        assert_eq!(
+            ab_unfrozen.paths,
+            vec![
+                path(&[1, 2, 1]),
+                path(&[1, 2, 1]),
+                path(&[1, 2, 1]),
+                path(&[1, 1, 2]),
+            ]
+        );
+        assert_eq!(
+            ab_b_frozen.paths,
+            vec![
+                path(&[1, 2, 1]),
+                path(&[1, 2, 1]),
+                path(&[1, 2, 1]),
+                path(&[2, 1, 2]),
+            ]
+        );
+
+        assert_ne!(
+            &ab_unfrozen.paths[..set_a.len()],
+            a_only.paths.as_slice(),
+            "adding set B should change the reconciled assignments for set A",
+        );
+        assert_eq!(
+            &ab_b_frozen.paths[..set_a.len()],
+            &ab_unfrozen.paths[..set_a.len()],
+            "frozen set B should still influence the reconciled assignments for set A",
+        );
+        assert_ne!(
+            &ab_b_frozen.paths[set_a.len()..],
+            &ab_unfrozen.paths[set_a.len()..],
+            "set B should reconcile differently when it is allowed to move",
+        );
+        assert_eq!(
+            &ab_b_frozen.paths[set_a.len()..],
+            set_b.as_slice(),
+            "frozen set B must retain its original assignments",
+        );
     }
 
     #[test]
@@ -1503,16 +1765,17 @@ mod tests {
         let labels = labels(&[&[1, 1, 1], &[1, 2, 1], &[2, 1, 2]]);
         let weights = vec![1.0; labels.n_rows()];
 
-        let reconciled = run(
+        let output = run(
             &labels,
             &weights,
             LevelWeightMode::Unweighted,
             options(true, 1),
+            &[],
         )
         .expect("augment-path reconciliation should succeed");
 
         assert_eq!(
-            reconciled,
+            output.paths,
             vec![
                 path(&[1, 1, 1]),
                 path(&[1, 1, 1]),
@@ -1520,7 +1783,8 @@ mod tests {
             ]
         );
 
-        let rendered = reconciled
+        let rendered = output
+            .paths
             .iter()
             .map(|path| path.iter().map(ToString::to_string).collect::<Vec<_>>())
             .collect::<Vec<_>>();
@@ -1542,12 +1806,14 @@ mod tests {
         let feasible_ids = state.realized_path_ids_in_row_order();
         let candidates = vec![edge(0, 0, 1, 1); 10];
         let weights = vec![1.0; assigned.len()];
+        let fr = no_frozen_rows(assigned.len());
         let inputs = ScoringInputs {
             assigned_state: &state,
             path_store: &store,
             labels: &labels,
             sample_weights: &weights,
             level_weight_mode: LevelWeightMode::Unweighted,
+            frozen_rows: &fr,
         };
         let serial_prepared =
             prepared_round(&candidates, &feasible_ids, &state, &store, &labels, None);
@@ -1591,8 +1857,9 @@ mod tests {
             path(&[4, 4, 4, 3]),
         ]);
         let state = ReconciliationState::new(&labels);
+        let fr = no_frozen_rows(labels.n_rows());
         let round = state
-            .collect_round_candidates(None)
+            .collect_round_candidates(None, &fr)
             .expect("conflicting input should produce a reconciliation round");
         let inputs = ScoringInputs {
             assigned_state: &state.assigned_state,
@@ -1600,6 +1867,7 @@ mod tests {
             labels: &labels,
             sample_weights: &[1.0; 4],
             level_weight_mode: LevelWeightMode::Unweighted,
+            frozen_rows: &fr,
         };
         let prepared = prepared_round(
             &round.candidates,
@@ -1631,6 +1899,7 @@ mod tests {
             edge(1, 1, 2, 0),
             edge(1, 1, 2, 2),
         ];
+        let fr = no_frozen_rows(assigned.len());
 
         let serial_prepared =
             prepared_round(&candidates, &feasible_ids, &state, &store, &labels, None);
@@ -1653,6 +1922,7 @@ mod tests {
             labels: &labels,
             sample_weights: &weights,
             level_weight_mode: LevelWeightMode::Unweighted,
+            frozen_rows: &fr,
         };
         let serial_scores = score_candidates(&serial_prepared, &inputs);
         let parallel_scores = score_candidates(&parallel_prepared, &inputs);
@@ -1705,6 +1975,7 @@ mod tests {
         let feasible_ids = state.realized_path_ids_in_row_order();
         let candidate = edge(0, 1, 1, 1);
         let weights = [1.0, 1.5, 2.0, 0.5];
+        let fr = no_frozen_rows(assigned.len());
         let cached_prepared = prepared_round(
             std::slice::from_ref(&candidate),
             &feasible_ids,
@@ -1730,6 +2001,7 @@ mod tests {
             labels: &labels,
             sample_weights: &weights,
             level_weight_mode: LevelWeightMode::Unweighted,
+            frozen_rows: &fr,
         };
         let expected = brute_force_candidate_cost(
             &candidate,
@@ -1789,6 +2061,7 @@ mod tests {
         let feasible_ids = grouped_state.realized_path_ids_in_row_order();
         let candidate = edge(0, 1, 1, 1);
         let pruned_ids = paths::prune_path_ids(&feasible_ids, &candidate, &mut store);
+        let fr = no_frozen_rows(assigned.len());
         let prepared = prepared_round(
             std::slice::from_ref(&candidate),
             &feasible_ids,
@@ -1805,6 +2078,7 @@ mod tests {
             &store,
             &labels,
             &mut grouped_state,
+            &fr,
         );
         reassign_affected_samples_by_full_scan(
             &candidate,
@@ -1812,6 +2086,7 @@ mod tests {
             &store,
             &labels,
             &mut full_scan_state,
+            &fr,
         );
 
         assert_eq!(
@@ -1847,12 +2122,14 @@ mod tests {
         let feasible_ids = state.realized_path_ids_in_row_order();
         let candidates = vec![edge(0, 0, 1, 1)];
         let weights = vec![1.0; assigned.len()];
+        let fr = no_frozen_rows(assigned.len());
         let inputs = ScoringInputs {
             assigned_state: &state,
             path_store: &store,
             labels: &labels,
             sample_weights: &weights,
             level_weight_mode: LevelWeightMode::Unweighted,
+            frozen_rows: &fr,
         };
         let serial_prepared =
             prepared_round(&candidates, &feasible_ids, &state, &store, &labels, None);

@@ -38,6 +38,9 @@ pub(crate) struct Cli {
 
     #[command(flatten)]
     pub(crate) runtime: RuntimeArgs,
+
+    #[command(flatten)]
+    pub(crate) constraint: ConstraintArgs,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -97,4 +100,15 @@ pub(crate) struct RuntimeArgs {
     /// Repeat to increase logging verbosity (-v INFO, -vv DEBUG, -vvv TRACE)
     #[arg(short, long, action = ArgAction::Count, help_heading = "Runtime and logging")]
     pub(crate) verbose: u8,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct ConstraintArgs {
+    /// File containing IDs of frozen samples (one per line)
+    #[arg(
+        long = "freeze-samples",
+        value_name = "PATH",
+        help_heading = "Reconciliation"
+    )]
+    pub(crate) freeze_samples: Option<String>,
 }

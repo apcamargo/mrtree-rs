@@ -93,6 +93,20 @@ pub enum MrtreeError {
     #[error("Failed to build rayon thread pool: {0}")]
     ThreadPoolBuild(String),
 
+    #[error("Input contains duplicate sample IDs")]
+    DuplicateSampleIds,
+
+    #[error("Frozen sample ID not found: {sample_id}")]
+    FrozenSampleIdNotFound { sample_id: String },
+
+    #[error(
+        "Frozen samples are not supported together with --consensus; \
+         consensus rewrites cluster labels before reconciliation, \
+         which would violate the guarantee that frozen rows keep their \
+         full path unchanged"
+    )]
+    FrozenSamplesWithConsensus,
+
     #[error("Internal algorithm invariant violation: {0}")]
     InternalAlgorithmInvariantViolation(String),
 }

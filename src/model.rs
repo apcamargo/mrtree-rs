@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::error::MrtreeError;
@@ -180,11 +181,21 @@ impl LabelMatrix {
     }
 }
 
+pub(crate) fn validate_unique_sample_ids(sample_ids: &[String]) -> crate::Result<()> {
+    let mut seen = HashSet::with_capacity(sample_ids.len());
+    for id in sample_ids {
+        if !seen.insert(id) {
+            return Err(MrtreeError::DuplicateSampleIds);
+        }
+    }
+    Ok(())
+}
+
 impl InputTable {
     /// # Errors
     ///
     /// Returns an error if the sample IDs or cluster headers do not match the
-    /// dimensions of `labels`.
+    /// dimensions of `labels`, or if sample IDs are not unique.
     pub fn new(
         sample_header: Option<String>,
         sample_ids: Vec<String>,
@@ -206,6 +217,8 @@ impl InputTable {
                 actual: headers.len(),
             });
         }
+
+        validate_unique_sample_ids(&sample_ids)?;
 
         Ok(Self {
             sample_header,
@@ -256,7 +269,8 @@ impl EffectiveTable {
     /// # Errors
     ///
     /// Returns an error if the sample IDs, cluster headers, original-column
-    /// indices, or `K` metadata do not match the dimensions of `labels`.
+    /// indices, or `K` metadata do not match the dimensions of `labels`, or
+    /// if sample IDs are not unique.
     pub fn new(
         sample_header: Option<String>,
         sample_ids: Vec<String>,
@@ -288,6 +302,8 @@ impl EffectiveTable {
                 ks: ks.len(),
             });
         }
+
+        validate_unique_sample_ids(&sample_ids)?;
 
         Ok(Self {
             sample_header,

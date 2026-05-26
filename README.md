@@ -72,11 +72,24 @@ Each reconciliation round proceeds as follows:
 5. Score the candidate by summing, over those samples, the sample weight multiplied by the per-level edit cost between the sample's current assigned path and its chosen replacement path. By default all levels have equal weight, so this reduces to the number of changed levels.
 6. Apply the candidate with the lowest total score, break ties deterministically, reassign only the rows whose current parent conflicts with the selected relation, and repeat until every finer-resolution cluster appears under exactly one broader cluster.
 
-Three parameters affect this procedure:
+Four parameters affect this procedure:
 
-- `--sample-weighting` computes one weight per sample before the greedy rounds begin, using the label matrix that enters reconciliation. If `--consensus` is enabled, that means the consensus-reduced matrix. Smaller clusters receive larger weights, making changes that disrupt those groups more expensive. For sample $i$, the weight is $w_i = \left(\sum_{\ell=1}^{L} \lvert C_{\ell}(i) \rvert\right)^{-0.5}$, where $\lvert C_{\ell}(i) \rvert$ is the size of the cluster containing $i$ at level $\ell$.
-- `--level-weights` assigns one positive finite weight per clustering level in the original TSV column order, excluding the sample ID column. These weights affect candidate edit cost during reconciliation in the following manner: $w_i \times \sum_{\ell=1}^{L} \alpha_\ell \mathbf{1}[\text{level } \ell \text{ changes}]$, where $w_i$ is the sample weight and $\alpha_\ell$ is the user-supplied level weight. Per-level weights also influence same-K consensus construction when `--consensus` is enabled.
+- `--sample-weighting` computes one weight per sample before reconciliation begins, using the label matrix that enters reconciliation. If `--consensus` is enabled, this refers to the consensus-reduced matrix. Smaller clusters receive larger weights, making changes that disrupt those groups more expensive. For sample $i$, the weight is:
+
+  $$
+  w_i = \left(\sum_{\ell=1}^{L} \lvert C_{\ell}(i) \rvert\right)^{-0.5}
+  $$
+
+  where $\lvert C_{\ell}(i) \rvert$ is the size of the cluster containing $i$ at level $\ell$.
+- `--level-weights` assigns one positive finite weight to each clustering level in the input TSV column order, excluding the sample ID column. These weights affect candidate edit costs during reconciliation according to
+
+  $$
+  w_i \times \sum_{\ell=1}^{L} \alpha_\ell \mathbf{1}[\text{level } \ell \text{ changes}],
+  $$
+
+  where $w_i$ is the sample weight and $\alpha_\ell$ is the user-supplied weight for level $\ell$. Per-level weights also influence same-$K$ consensus construction when `--consensus` is enabled.
 - `--augment-path` introduces placeholder labels written as `-1` when this preserves structure that would otherwise be forced into a less informative hierarchy. `-1` represents a synthetic intermediate assignment, not a real input cluster label.
+- `--freeze-samples` forces selected samples to retain their original cluster paths throughout reconciliation. If two or more frozen samples contain conflicting hierarchies, the reconciliation procedure will be unable to produce a fully consistent hierarchy.
 
 ## Installation
 
@@ -95,6 +108,7 @@ mrtree-rs [OPTIONS] [INPUT] [OUTPUT]
 ### Input format
 
 - Input must be a TSV file with one sample ID column and at least two columns representing different clustering levels.
+- Sample IDs must be unique.
 - Cluster labels must be non-negative integers.
 - Use `--header` when the first row contains column names.
 
@@ -114,6 +128,7 @@ mrtree-rs [OPTIONS] [INPUT] [OUTPUT]
 | `--header` | Treat the first row as a header and emit a header row on output | Off |
 | `--max-k <N>` | Keep only clustering columns where the number of clusters (`K`) is ≤ `N` | no limit |
 | `--consensus` | Combine repeated clustering levels with the same `K` (same number of clusters) | Off |
+| `--freeze-samples <PATH>` | File containing IDs of frozen samples (one per line) | Off |
 | `--sample-weighting` | Give more weight to samples from smaller clusters | Off |
 | `--level-weights <W1,W2,...>` | Use custom per-level weights for scoring and consensus | `1.0` per level |
 | `--augment-path` | Enable synthetic path augmentation | Off |
