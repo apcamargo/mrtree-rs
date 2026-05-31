@@ -76,16 +76,16 @@ Four parameters affect this procedure:
 
 - `--sample-weighting` computes one weight per sample before reconciliation begins, using the label matrix that enters reconciliation. If `--consensus` is enabled, this refers to the consensus-reduced matrix. Smaller clusters receive larger weights, making changes that disrupt those groups more expensive. For sample $i$, the weight is:
 
-  $$
-  w_i = \left(\sum_{\ell=1}^{L} \lvert C_{\ell}(i) \rvert\right)^{-0.5}
-  $$
+$$
+w_i = \left(\sum_{\ell=1}^{L} \lvert C_{\ell}(i) \rvert\right)^{-0.5}
+$$
 
   where $\lvert C_{\ell}(i) \rvert$ is the size of the cluster containing $i$ at level $\ell$.
 - `--level-weights` assigns one positive finite weight to each clustering level in the input TSV column order, excluding the sample ID column. These weights affect candidate edit costs during reconciliation according to
 
-  $$
-  w_i \times \sum_{\ell=1}^{L} \alpha_\ell \mathbf{1}[\text{level } \ell \text{ changes}],
-  $$
+$$
+w_i \times \sum_{\ell=1}^{L} \alpha_\ell \mathbf{1}[\text{level } \ell \text{ changes}],
+$$
 
   where $w_i$ is the sample weight and $\alpha_\ell$ is the user-supplied weight for level $\ell$. Per-level weights also influence same-$K$ consensus construction when `--consensus` is enabled.
 - `--augment-path` introduces placeholder labels written as `-1` when this preserves structure that would otherwise be forced into a less informative hierarchy. `-1` represents a synthetic intermediate assignment, not a real input cluster label.
