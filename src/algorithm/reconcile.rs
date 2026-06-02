@@ -341,34 +341,45 @@ impl<'a> PreparedRound<'a> {
             .copied()
             .map(|path_id| path_store.get(path_id).as_slice())
             .collect::<Vec<_>>();
-        let build_distance_table = |group: &mut ChildGroup| {
-            let mut distances =
-                Vec::with_capacity(group.rows.len().saturating_mul(feasible_paths.len()));
-            for &row in &group.rows {
-                let row_labels = labels.row(row);
-                for &feasible_path in &feasible_paths {
-                    distances.push(
-                        u32::try_from(paths::path_distance(row_labels, feasible_path))
-                            .expect("path distance should fit in u32"),
-                    );
+
+        let Some(pool) = thread_pool else {
+            for group in &mut self.child_groups {
+                let mut distances =
+                    Vec::with_capacity(group.rows.len().saturating_mul(self.feasible_path_count));
+                for &row in &group.rows {
+                    let row_labels = labels.row(row);
+                    for &feasible_path in &feasible_paths {
+                        distances.push(
+                            u32::try_from(paths::path_distance(row_labels, feasible_path))
+                                .expect("path distance should fit in u32"),
+                        );
+                    }
                 }
+                group.distance_table = Some(distances);
             }
-            group.distance_table = Some(distances);
+            return;
         };
 
-        if self.child_groups.len() > 1 {
-            if let Some(pool) = thread_pool {
-                pool.install(|| {
-                    self.child_groups
-                        .par_iter_mut()
-                        .for_each(build_distance_table);
-                });
-            } else {
-                self.child_groups.iter_mut().for_each(build_distance_table);
-            }
-        } else {
-            self.child_groups.iter_mut().for_each(build_distance_table);
-        }
+        let feasible_paths = &feasible_paths;
+        pool.install(|| {
+            self.child_groups.par_iter_mut().for_each(|group| {
+                let mut distances =
+                    vec![0_u32; group.rows.len().saturating_mul(self.feasible_path_count)];
+                distances
+                    .par_chunks_mut(self.feasible_path_count.max(1))
+                    .zip(group.rows.par_iter())
+                    .for_each(|(row_distances, &row)| {
+                        let row_labels = labels.row(row);
+                        for (slot, &feasible_path) in
+                            row_distances.iter_mut().zip(feasible_paths.iter())
+                        {
+                            *slot = u32::try_from(paths::path_distance(row_labels, feasible_path))
+                                .expect("path distance should fit in u32");
+                        }
+                    });
+                group.distance_table = Some(distances);
+            });
+        });
     }
 
     fn rows_for_job(&self, job_index: usize) -> &[usize] {
