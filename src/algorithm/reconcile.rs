@@ -312,13 +312,13 @@ impl<'a> PreparedRound<'a> {
         labels: &LabelMatrix,
         thread_pool: Option<&ThreadPool>,
     ) {
-        let cache_bytes = self
+        let distance_table_cells = self
             .child_groups
             .iter()
             .map(|group| group.rows.len())
             .sum::<usize>()
-            .saturating_mul(self.feasible_path_count)
-            .saturating_mul(std::mem::size_of::<u32>());
+            .saturating_mul(self.feasible_path_count);
+        let cache_bytes = distance_table_cells.saturating_mul(std::mem::size_of::<u32>());
         if cache_bytes == 0 || cache_bytes > MAX_SCORING_DISTANCE_CACHE_BYTES {
             debug!(
                 cache_bytes,
@@ -342,7 +342,12 @@ impl<'a> PreparedRound<'a> {
             .map(|path_id| path_store.get(path_id).as_slice())
             .collect::<Vec<_>>();
 
-        let Some(pool) = thread_pool else {
+        let Some(pool) = thread_pool.filter(|pool| {
+            distance_table_cells.saturating_mul(labels.n_cols())
+                >= pool
+                    .current_num_threads()
+                    .saturating_mul(MIN_LABEL_COMPARISONS_PER_TASK)
+        }) else {
             for group in &mut self.child_groups {
                 let mut distances =
                     Vec::with_capacity(group.rows.len().saturating_mul(self.feasible_path_count));
