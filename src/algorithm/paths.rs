@@ -1,6 +1,7 @@
 use std::hash::{Hash, Hasher};
 
 use indexmap::IndexSet;
+use rustc_hash::FxBuildHasher;
 
 use crate::model::{Edge, Path, PathLabel, RealLabel};
 
@@ -9,7 +10,7 @@ pub(super) struct PathId(usize);
 
 #[derive(Debug, Default)]
 pub(super) struct PathStore {
-    paths: IndexSet<Path>,
+    paths: IndexSet<Path, FxBuildHasher>,
 }
 
 impl PathStore {
@@ -33,7 +34,7 @@ fn unique_items<T>(items: impl IntoIterator<Item = T>) -> Vec<T>
 where
     T: Eq + std::hash::Hash,
 {
-    let mut set = IndexSet::new();
+    let mut set: IndexSet<T, FxBuildHasher> = IndexSet::default();
     set.extend(items);
     set.into_iter().collect()
 }

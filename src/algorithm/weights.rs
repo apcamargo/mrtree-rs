@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use tracing::{Level, enabled, trace};
 
 use crate::model::LabelMatrix;
@@ -16,7 +15,7 @@ struct WeightTraceSummary {
 pub(crate) fn compute_sample_weights(labels: &LabelMatrix) -> Vec<f64> {
     let mut layer_sizes = Vec::with_capacity(labels.n_cols());
     for column in 0..labels.n_cols() {
-        let mut sizes = HashMap::with_capacity(labels.n_rows());
+        let mut sizes = FxHashMap::with_capacity_and_hasher(labels.n_rows(), FxBuildHasher);
         for value in labels.column_iter(column) {
             *sizes.entry(value).or_insert(0_usize) += 1;
         }
@@ -52,13 +51,10 @@ pub(crate) fn compute_sample_weights(labels: &LabelMatrix) -> Vec<f64> {
 }
 
 fn summarize_weight_trace(
-    layer_sizes: &[HashMap<crate::model::RealLabel, usize>],
+    layer_sizes: &[FxHashMap<crate::model::RealLabel, usize>],
     weights: &[f64],
 ) -> WeightTraceSummary {
-    let distinct_per_level = layer_sizes
-        .iter()
-        .map(std::collections::HashMap::len)
-        .collect::<Vec<_>>();
+    let distinct_per_level = layer_sizes.iter().map(FxHashMap::len).collect::<Vec<_>>();
     let cluster_size_ranges = layer_sizes
         .iter()
         .map(|sizes| {
@@ -137,7 +133,7 @@ mod tests {
         );
         let mut layer_sizes = Vec::new();
         for column in 0..labels.n_cols() {
-            let mut sizes = HashMap::new();
+            let mut sizes = FxHashMap::default();
             for value in labels.column_iter(column) {
                 *sizes.entry(value).or_insert(0_usize) += 1;
             }

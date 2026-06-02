@@ -13,7 +13,8 @@ use tracing::{Level, debug, enabled, info, warn};
 pub use crate::error::MrtreeError as Error;
 
 use crate::model::{InputTable, Path};
-use std::collections::{BTreeSet, HashMap};
+use rustc_hash::FxHashMap;
+use std::collections::BTreeSet;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -98,7 +99,7 @@ pub fn reconcile_input(input: InputTable, options: &RunOptions) -> Result<RunRes
             return Err(Error::FrozenSamplesWithConsensus);
         }
 
-        let sample_id_to_row: HashMap<&str, usize> = prepared
+        let sample_id_to_row: FxHashMap<&str, usize> = prepared
             .effective()
             .sample_ids()
             .iter()

@@ -1,11 +1,12 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use float_cmp::approx_eq;
 #[cfg(test)]
 use float_cmp::assert_approx_eq;
 use rayon::ThreadPool;
 use rayon::prelude::*;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use tracing::{Level, debug, enabled, info, trace};
 
 use super::paths;
@@ -34,12 +35,12 @@ fn resolve_thread_count(requested_threads: usize) -> usize {
 #[derive(Debug, Clone)]
 struct AssignedPathState {
     assigned_path_ids: Vec<paths::PathId>,
-    rows_by_path: HashMap<paths::PathId, BTreeSet<usize>>,
+    rows_by_path: FxHashMap<paths::PathId, BTreeSet<usize>>,
 }
 
 impl AssignedPathState {
     fn new(assigned_path_ids: Vec<paths::PathId>) -> Self {
-        let mut rows_by_path = HashMap::<paths::PathId, BTreeSet<usize>>::new();
+        let mut rows_by_path = FxHashMap::<paths::PathId, BTreeSet<usize>>::default();
         for (row, &path_id) in assigned_path_ids.iter().enumerate() {
             rows_by_path.entry(path_id).or_default().insert(row);
         }
@@ -240,7 +241,8 @@ impl<'a> PreparedRound<'a> {
         thread_pool: Option<&ThreadPool>,
     ) -> Self {
         let feasible_path_count = feasible_path_ids.len();
-        let mut child_group_index_by_node = HashMap::with_capacity(candidates.len());
+        let mut child_group_index_by_node =
+            FxHashMap::with_capacity_and_hasher(candidates.len(), FxBuildHasher);
         let mut child_groups = Vec::with_capacity(candidates.len());
         let mut child_layers = Vec::with_capacity(candidates.len());
         for edge in candidates {
@@ -248,7 +250,7 @@ impl<'a> PreparedRound<'a> {
                 child_layers.push(edge.end.layer);
             }
             child_group_index_by_node
-                .entry(edge.end.clone())
+                .entry(edge.end)
                 .or_insert_with(|| {
                     child_groups.push(ChildGroup::default());
                     child_groups.len() - 1
@@ -378,10 +380,10 @@ fn build_candidate_job<'a>(
     edge: &Edge,
     feasible_path_ids: &[paths::PathId],
     path_store: &'a paths::PathStore,
-    child_group_index_by_node: &HashMap<NodeId, usize>,
+    child_group_index_by_node: &FxHashMap<NodeId, usize>,
 ) -> CandidateJob<'a> {
     CandidateJob {
-        edge: edge.clone(),
+        edge: *edge,
         child_group_index: *child_group_index_by_node
             .get(&edge.end)
             .expect("candidate children should have a prepared child group"),
@@ -393,7 +395,7 @@ fn build_candidate_jobs<'a>(
     candidates: &[Edge],
     feasible_path_ids: &[paths::PathId],
     path_store: &'a paths::PathStore,
-    child_group_index_by_node: &HashMap<NodeId, usize>,
+    child_group_index_by_node: &FxHashMap<NodeId, usize>,
     thread_pool: Option<&ThreadPool>,
 ) -> Vec<CandidateJob<'a>> {
     if let Some(pool) = thread_pool.filter(|_| candidates.len() > 1) {
@@ -1058,7 +1060,7 @@ where
                 .zip(candidate_costs)
                 .enumerate()
                 .map(|(order, (job, cost))| Candidate {
-                    edge: job.edge.clone(),
+                    edge: job.edge,
                     cost,
                     order,
                 })
@@ -1069,7 +1071,7 @@ where
             .iter()
             .enumerate()
             .map(|(order, job)| Candidate {
-                edge: job.edge.clone(),
+                edge: job.edge,
                 cost: candidate_cost(job, prepared_round, inputs, change_cost),
                 order,
             })
@@ -1389,7 +1391,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(order, job)| Candidate {
-                edge: job.edge.clone(),
+                edge: job.edge,
                 cost: match inputs.level_weight_mode {
                     LevelWeightMode::Unweighted => {
                         candidate_cost(job, prepared_round, inputs, |current_path, new_path| {

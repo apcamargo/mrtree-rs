@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
-use std::collections::HashSet;
 use std::fmt;
+
+use rustc_hash::{FxBuildHasher, FxHashSet};
 
 use crate::error::MrtreeError;
 
@@ -109,7 +110,7 @@ impl PartialOrd for PathLabel {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct NodeId {
     pub layer: usize,
     pub label: PathLabel,
@@ -117,13 +118,13 @@ pub(crate) struct NodeId {
 
 pub type Path = Vec<PathLabel>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Edge {
     pub start: NodeId,
     pub end: NodeId,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Candidate {
     pub edge: Edge,
     pub cost: f64,
@@ -182,7 +183,7 @@ impl LabelMatrix {
 }
 
 pub(crate) fn validate_unique_sample_ids(sample_ids: &[String]) -> crate::Result<()> {
-    let mut seen = HashSet::with_capacity(sample_ids.len());
+    let mut seen = FxHashSet::with_capacity_and_hasher(sample_ids.len(), FxBuildHasher);
     for id in sample_ids {
         if !seen.insert(id) {
             return Err(MrtreeError::DuplicateSampleIds);

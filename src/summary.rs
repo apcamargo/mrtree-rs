@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::{FxBuildHasher, FxHashSet};
 
 use crate::model::{EffectiveTable, LabelMatrix, Path, PathLabel};
 
@@ -13,7 +13,7 @@ pub(crate) struct OutputSummary {
 pub(crate) fn clusters_per_level(labels: &LabelMatrix) -> Vec<usize> {
     (0..labels.n_cols())
         .map(|column| {
-            let mut distinct = HashSet::with_capacity(labels.n_rows());
+            let mut distinct = FxHashSet::with_capacity_and_hasher(labels.n_rows(), FxBuildHasher);
             distinct.extend(labels.column_iter(column));
             distinct.len()
         })
@@ -28,7 +28,7 @@ pub(crate) fn summarize_output(
 
     let n_levels = effective.labels().n_cols();
     let mut clusters_by_level = (0..n_levels)
-        .map(|_| HashSet::with_capacity(effective.labels().n_rows()))
+        .map(|_| FxHashSet::with_capacity_and_hasher(effective.labels().n_rows(), FxBuildHasher))
         .collect::<Vec<_>>();
     let mut reassignments_per_level = vec![0; n_levels];
     let mut rows_reassigned = 0;

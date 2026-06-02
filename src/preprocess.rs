@@ -1,6 +1,6 @@
-use std::collections::HashSet;
 use std::fmt;
 
+use rustc_hash::{FxBuildHasher, FxHashSet};
 use tracing::{Level, enabled, trace};
 
 use crate::error::MrtreeError;
@@ -136,7 +136,7 @@ pub fn prepare(input: InputTable, options: &PrepareOptions) -> crate::Result<Pre
 }
 
 fn count_distinct(labels: &LabelMatrix, column: usize) -> usize {
-    let mut distinct = HashSet::with_capacity(labels.n_rows());
+    let mut distinct = FxHashSet::with_capacity_and_hasher(labels.n_rows(), FxBuildHasher);
     distinct.extend(labels.column_iter(column));
     distinct.len()
 }
